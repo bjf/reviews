@@ -1,0 +1,32 @@
+From 0cdfa86580f5e762f4e551e0f271c52b7e4eb07e Mon Sep 17 00:00:00 2001
+From: Nicolin Chen <nicolinc@nvidia.com>
+Date: Tue, 28 Jun 2022 14:32:49 -0700
+Subject: [PATCH 131/141] WAR: iommufd: call iommu_enable_nesting
+
+This is to set smmu_domain->stage to ARM_SMMU_DOMAIN_NESTED, before
+a device gets attached to the domain where it initializes a stage-2
+formatted page table. Otherwise, it would end up with a stage-1 one.
+
+Change-Id: Ia08566b64f4e29e6047010734bd64a5acbde5990
+Signed-off-by: Nicolin Chen <nicolinc@nvidia.com>
+
+4	0	drivers/iommu/iommufd/hw_pagetable.c
+
+diff --git a/drivers/iommu/iommufd/hw_pagetable.c b/drivers/iommu/iommufd/hw_pagetable.c
+index 56e037fb24f8..62ab94a0e7f4 100644
+--- a/drivers/iommu/iommufd/hw_pagetable.c
++++ b/drivers/iommu/iommufd/hw_pagetable.c
+@@ -87,6 +87,10 @@ iommufd_hw_pagetable_auto_get(struct iommufd_ctx *ictx,
+ 		goto out_abort;
+ 	}
+ 
++	rc = iommu_enable_nesting(hwpt->domain);
++	if (rc)
++		goto out_abort;
++
+ 	xa_init_flags(&hwpt->devices, XA_FLAGS_ALLOC1);
+ 	mutex_init(&hwpt->devices_lock);
+ 	hwpt->type = IOMMUFD_HWPT_KERNEL;
+-- 
+2.34.1
+

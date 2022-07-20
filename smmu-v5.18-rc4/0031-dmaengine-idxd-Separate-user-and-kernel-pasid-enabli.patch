@@ -1,0 +1,133 @@
+From 466cce695fc213183c60c5344235fe1c0e2ef1fc Mon Sep 17 00:00:00 2001
+From: Dave Jiang <dave.jiang@intel.com>
+Date: Wed, 20 Apr 2022 09:51:02 +0800
+Subject: [PATCH 031/141] dmaengine: idxd: Separate user and kernel pasid
+ enabling
+
+The idxd driver always gated the pasid enabling under a single knob and
+this assumption is incorrect. The pasid used for kernel operation can be
+independently toggled and has no dependency on the user pasid (and vice
+versa). Split the two so they are independent "enabled" flags.
+
+Cc: Vinod Koul <vkoul@kernel.org>
+Signed-off-by: Dave Jiang <dave.jiang@intel.com>
+Signed-off-by: Jacob Pan <jacob.jun.pan@linux.intel.com>
+Link: https://lore.kernel.org/linux-iommu/20220315050713.2000518-10-jacob.jun.pan@linux.intel.com/
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+
+2	2	drivers/dma/idxd/cdev.c
+6	0	drivers/dma/idxd/idxd.h
+18	12	drivers/dma/idxd/init.c
+
+diff --git a/drivers/dma/idxd/cdev.c b/drivers/dma/idxd/cdev.c
+index b9b2b4a4124e..7df996deffbe 100644
+--- a/drivers/dma/idxd/cdev.c
++++ b/drivers/dma/idxd/cdev.c
+@@ -99,7 +99,7 @@ static int idxd_cdev_open(struct inode *inode, struct file *filp)
+ 	ctx->wq = wq;
+ 	filp->private_data = ctx;
+ 
+-	if (device_pasid_enabled(idxd)) {
++	if (device_user_pasid_enabled(idxd)) {
+ 		sva = iommu_sva_bind_device(dev, current->mm, NULL);
+ 		if (IS_ERR(sva)) {
+ 			rc = PTR_ERR(sva);
+@@ -152,7 +152,7 @@ static int idxd_cdev_release(struct inode *node, struct file *filep)
+ 	if (wq_shared(wq)) {
+ 		idxd_device_drain_pasid(idxd, ctx->pasid);
+ 	} else {
+-		if (device_pasid_enabled(idxd)) {
++		if (device_user_pasid_enabled(idxd)) {
+ 			/* The wq disable in the disable pasid function will drain the wq */
+ 			rc = idxd_wq_disable_pasid(wq);
+ 			if (rc < 0)
+diff --git a/drivers/dma/idxd/idxd.h b/drivers/dma/idxd/idxd.h
+index da72eb15f610..ccbefd0be617 100644
+--- a/drivers/dma/idxd/idxd.h
++++ b/drivers/dma/idxd/idxd.h
+@@ -239,6 +239,7 @@ enum idxd_device_flag {
+ 	IDXD_FLAG_CONFIGURABLE = 0,
+ 	IDXD_FLAG_CMD_RUNNING,
+ 	IDXD_FLAG_PASID_ENABLED,
++	IDXD_FLAG_USER_PASID_ENABLED,
+ };
+ 
+ struct idxd_dma_dev {
+@@ -469,6 +470,11 @@ static inline bool device_pasid_enabled(struct idxd_device *idxd)
+ 	return test_bit(IDXD_FLAG_PASID_ENABLED, &idxd->flags);
+ }
+ 
++static inline bool device_user_pasid_enabled(struct idxd_device *idxd)
++{
++	return test_bit(IDXD_FLAG_USER_PASID_ENABLED, &idxd->flags);
++}
++
+ static inline bool device_swq_supported(struct idxd_device *idxd)
+ {
+ 	return (support_enqcmd && device_pasid_enabled(idxd));
+diff --git a/drivers/dma/idxd/init.c b/drivers/dma/idxd/init.c
+index 993a5dcca24f..e1b5d1e4a949 100644
+--- a/drivers/dma/idxd/init.c
++++ b/drivers/dma/idxd/init.c
+@@ -513,16 +513,19 @@ static int idxd_probe(struct idxd_device *idxd)
+ 
+ 	if (IS_ENABLED(CONFIG_INTEL_IDXD_SVM) && sva) {
+ 		rc = iommu_dev_enable_feature(dev, IOMMU_DEV_FEAT_SVA);
+-		if (rc == 0) {
+-			rc = idxd_enable_system_pasid(idxd);
+-			if (rc < 0) {
+-				iommu_dev_disable_feature(dev, IOMMU_DEV_FEAT_SVA);
+-				dev_warn(dev, "Failed to enable PASID. No SVA support: %d\n", rc);
+-			} else {
+-				set_bit(IDXD_FLAG_PASID_ENABLED, &idxd->flags);
+-			}
+-		} else {
++		if (rc) {
++			/*
++			 * Do not bail here since legacy DMA is still
++			 * supported, both user and in-kernel DMA with
++			 * PASID rely on SVA feature.
++			 */
+ 			dev_warn(dev, "Unable to turn on SVA feature.\n");
++		} else {
++			set_bit(IDXD_FLAG_USER_PASID_ENABLED, &idxd->flags);
++			if (idxd_enable_system_pasid(idxd))
++				dev_warn(dev, "No in-kernel DMA with PASID.\n");
++			else
++				set_bit(IDXD_FLAG_PASID_ENABLED, &idxd->flags);
+ 		}
+ 	} else if (!sva) {
+ 		dev_warn(dev, "User forced SVA off via module param.\n");
+@@ -561,7 +564,8 @@ static int idxd_probe(struct idxd_device *idxd)
+  err:
+ 	if (device_pasid_enabled(idxd))
+ 		idxd_disable_system_pasid(idxd);
+-	iommu_dev_disable_feature(dev, IOMMU_DEV_FEAT_SVA);
++	if (device_user_pasid_enabled(idxd) || device_pasid_enabled(idxd))
++		iommu_dev_disable_feature(dev, IOMMU_DEV_FEAT_SVA);
+ 	return rc;
+ }
+ 
+@@ -574,7 +578,8 @@ static void idxd_cleanup(struct idxd_device *idxd)
+ 	idxd_cleanup_internals(idxd);
+ 	if (device_pasid_enabled(idxd))
+ 		idxd_disable_system_pasid(idxd);
+-	iommu_dev_disable_feature(dev, IOMMU_DEV_FEAT_SVA);
++	if (device_user_pasid_enabled(idxd) || device_pasid_enabled(idxd))
++		iommu_dev_disable_feature(dev, IOMMU_DEV_FEAT_SVA);
+ }
+ 
+ static int idxd_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+@@ -691,7 +696,8 @@ static void idxd_remove(struct pci_dev *pdev)
+ 	free_irq(irq_entry->vector, irq_entry);
+ 	pci_free_irq_vectors(pdev);
+ 	pci_iounmap(pdev, idxd->reg_base);
+-	iommu_dev_disable_feature(&pdev->dev, IOMMU_DEV_FEAT_SVA);
++	if (device_user_pasid_enabled(idxd) || device_pasid_enabled(idxd))
++		iommu_dev_disable_feature(&pdev->dev, IOMMU_DEV_FEAT_SVA);
+ 	pci_disable_device(pdev);
+ 	destroy_workqueue(idxd->wq);
+ 	perfmon_pmu_remove(idxd);
+-- 
+2.34.1
+

@@ -1,0 +1,340 @@
+From 55144bd64a8b62db546858198b2a2fd712535bf8 Mon Sep 17 00:00:00 2001
+From: Jason Gunthorpe <jgg@nvidia.com>
+Date: Wed, 8 Sep 2021 12:18:00 -0300
+Subject: [PATCH 058/141] vfio/mdev: Consolidate all the device_api sysfs into
+ the core code
+
+Every driver just emits a static string, simply feed it through the ops
+and provide a standard sysfs show function.
+
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+3	1	Documentation/driver-api/vfio-mediated-device.rst
+1	8	drivers/gpu/drm/i915/gvt/kvmgt.c
+1	8	drivers/s390/cio/vfio_ccw_ops.c
+1	8	drivers/s390/crypto/vfio_ap_ops.c
+1	1	drivers/vfio/mdev/mdev_core.c
+24	3	drivers/vfio/mdev/mdev_sysfs.c
+2	5	include/linux/mdev.h
+1	8	samples/vfio-mdev/mbochs.c
+1	8	samples/vfio-mdev/mdpy.c
+1	9	samples/vfio-mdev/mtty.c
+
+diff --git a/Documentation/driver-api/vfio-mediated-device.rst b/Documentation/driver-api/vfio-mediated-device.rst
+index 9f26079cacae..f410a1cd98bb 100644
+--- a/Documentation/driver-api/vfio-mediated-device.rst
++++ b/Documentation/driver-api/vfio-mediated-device.rst
+@@ -137,6 +137,7 @@ The structures in the mdev_parent_ops structure are as follows:
+ * mdev_attr_groups: attributes of the mediated device
+ * supported_config: attributes to define supported configurations
+ * device_driver: device driver to bind for mediated device instances
++* device_api: String to pass through the sysfs file below
+ 
+ The mdev_parent_ops also still has various functions pointers.  Theses exist
+ for historical reasons only and shall not be used for new drivers.
+@@ -225,7 +226,8 @@ Directories and files under the sysfs for Each Physical Device
+ * device_api
+ 
+   This attribute should show which device API is being created, for example,
+-  "vfio-pci" for a PCI device.
++  "vfio-pci" for a PCI device. The core code maintins this sysfs using the
++  device_api member of mdev_parent_ops.
+ 
+ * available_instances
+ 
+diff --git a/drivers/gpu/drm/i915/gvt/kvmgt.c b/drivers/gpu/drm/i915/gvt/kvmgt.c
+index 057ec4490104..752d7a1211e6 100644
+--- a/drivers/gpu/drm/i915/gvt/kvmgt.c
++++ b/drivers/gpu/drm/i915/gvt/kvmgt.c
+@@ -163,12 +163,6 @@ static ssize_t available_instances_show(struct mdev_type *mtype,
+ 	return sprintf(buf, "%u\n", num);
+ }
+ 
+-static ssize_t device_api_show(struct mdev_type *mtype,
+-			       struct mdev_type_attribute *attr, char *buf)
+-{
+-	return sprintf(buf, "%s\n", VFIO_DEVICE_API_PCI_STRING);
+-}
+-
+ static ssize_t description_show(struct mdev_type *mtype,
+ 				struct mdev_type_attribute *attr, char *buf)
+ {
+@@ -202,13 +196,11 @@ static ssize_t name_show(struct mdev_type *mtype,
+ }
+ 
+ static MDEV_TYPE_ATTR_RO(available_instances);
+-static MDEV_TYPE_ATTR_RO(device_api);
+ static MDEV_TYPE_ATTR_RO(description);
+ static MDEV_TYPE_ATTR_RO(name);
+ 
+ static struct attribute *gvt_type_attrs[] = {
+ 	&mdev_type_attr_available_instances.attr,
+-	&mdev_type_attr_device_api.attr,
+ 	&mdev_type_attr_description.attr,
+ 	&mdev_type_attr_name.attr,
+ 	NULL,
+@@ -1767,6 +1759,7 @@ static const struct attribute_group *intel_vgpu_groups[] = {
+ 
+ static struct mdev_parent_ops intel_vgpu_ops = {
+ 	.mdev_attr_groups       = intel_vgpu_groups,
++	.device_api		= VFIO_DEVICE_API_PCI_STRING,
+ 	.create			= intel_vgpu_create,
+ 	.remove			= intel_vgpu_remove,
+ 
+diff --git a/drivers/s390/cio/vfio_ccw_ops.c b/drivers/s390/cio/vfio_ccw_ops.c
+index bd4d08afa3e4..a7f642be9c88 100644
+--- a/drivers/s390/cio/vfio_ccw_ops.c
++++ b/drivers/s390/cio/vfio_ccw_ops.c
+@@ -70,13 +70,6 @@ static ssize_t name_show(struct mdev_type *mtype,
+ }
+ static MDEV_TYPE_ATTR_RO(name);
+ 
+-static ssize_t device_api_show(struct mdev_type *mtype,
+-			       struct mdev_type_attribute *attr, char *buf)
+-{
+-	return sprintf(buf, "%s\n", VFIO_DEVICE_API_CCW_STRING);
+-}
+-static MDEV_TYPE_ATTR_RO(device_api);
+-
+ static ssize_t available_instances_show(struct mdev_type *mtype,
+ 					struct mdev_type_attribute *attr,
+ 					char *buf)
+@@ -90,7 +83,6 @@ static MDEV_TYPE_ATTR_RO(available_instances);
+ 
+ static struct attribute *mdev_types_attrs[] = {
+ 	&mdev_type_attr_name.attr,
+-	&mdev_type_attr_device_api.attr,
+ 	&mdev_type_attr_available_instances.attr,
+ 	NULL,
+ };
+@@ -640,6 +632,7 @@ struct mdev_driver vfio_ccw_mdev_driver = {
+ static const struct mdev_parent_ops vfio_ccw_mdev_ops = {
+ 	.owner			= THIS_MODULE,
+ 	.device_driver		= &vfio_ccw_mdev_driver,
++	.device_api		= VFIO_DEVICE_API_CCW_STRING,
+ 	.supported_type_groups  = mdev_type_groups,
+ };
+ 
+diff --git a/drivers/s390/crypto/vfio_ap_ops.c b/drivers/s390/crypto/vfio_ap_ops.c
+index 6e08d04b605d..838b1a3eac8a 100644
+--- a/drivers/s390/crypto/vfio_ap_ops.c
++++ b/drivers/s390/crypto/vfio_ap_ops.c
+@@ -530,17 +530,9 @@ static ssize_t available_instances_show(struct mdev_type *mtype,
+ 
+ static MDEV_TYPE_ATTR_RO(available_instances);
+ 
+-static ssize_t device_api_show(struct mdev_type *mtype,
+-			       struct mdev_type_attribute *attr, char *buf)
+-{
+-	return sprintf(buf, "%s\n", VFIO_DEVICE_API_AP_STRING);
+-}
+-
+-static MDEV_TYPE_ATTR_RO(device_api);
+ 
+ static struct attribute *vfio_ap_mdev_type_attrs[] = {
+ 	&mdev_type_attr_name.attr,
+-	&mdev_type_attr_device_api.attr,
+ 	&mdev_type_attr_available_instances.attr,
+ 	NULL,
+ };
+@@ -1501,6 +1493,7 @@ static struct mdev_driver vfio_ap_matrix_driver = {
+ static const struct mdev_parent_ops vfio_ap_matrix_ops = {
+ 	.owner			= THIS_MODULE,
+ 	.device_driver		= &vfio_ap_matrix_driver,
++	.device_api		= VFIO_DEVICE_API_AP_STRING,
+ 	.supported_type_groups	= vfio_ap_mdev_type_groups,
+ };
+ 
+diff --git a/drivers/vfio/mdev/mdev_core.c b/drivers/vfio/mdev/mdev_core.c
+index b314101237fe..c3018e8e6d32 100644
+--- a/drivers/vfio/mdev/mdev_core.c
++++ b/drivers/vfio/mdev/mdev_core.c
+@@ -129,7 +129,7 @@ int mdev_register_device(struct device *dev, const struct mdev_parent_ops *ops)
+ 	char *envp[] = { env_string, NULL };
+ 
+ 	/* check for mandatory ops */
+-	if (!ops || !ops->supported_type_groups)
++	if (!ops || !ops->supported_type_groups || !ops->device_api)
+ 		return -EINVAL;
+ 	if (!ops->device_driver && (!ops->create || !ops->remove))
+ 		return -EINVAL;
+diff --git a/drivers/vfio/mdev/mdev_sysfs.c b/drivers/vfio/mdev/mdev_sysfs.c
+index f5cf1931c54e..d4b99440d19e 100644
+--- a/drivers/vfio/mdev/mdev_sysfs.c
++++ b/drivers/vfio/mdev/mdev_sysfs.c
+@@ -74,9 +74,30 @@ static ssize_t create_store(struct mdev_type *mtype,
+ 
+ 	return count;
+ }
+-
+ static MDEV_TYPE_ATTR_WO(create);
+ 
++static ssize_t device_api_show(struct mdev_type *mtype,
++			       struct mdev_type_attribute *attr, char *buf)
++{
++	return sysfs_emit(buf, "%s\n", mtype->parent->ops->device_api);
++}
++static MDEV_TYPE_ATTR_RO(device_api);
++
++static struct attribute *mdev_types_std_attrs[] = {
++	&mdev_type_attr_create.attr,
++	&mdev_type_attr_device_api.attr,
++	NULL,
++};
++
++static struct attribute_group mdev_type_std_group = {
++	.attrs = mdev_types_std_attrs,
++};
++
++static const struct attribute_group *mdev_type_groups[] = {
++	&mdev_type_std_group,
++	NULL,
++};
++
+ static void mdev_type_release(struct kobject *kobj)
+ {
+ 	struct mdev_type *type = to_mdev_type(kobj);
+@@ -123,7 +144,7 @@ static struct mdev_type *add_mdev_supported_type(struct mdev_parent *parent,
+ 		return ERR_PTR(ret);
+ 	}
+ 
+-	ret = sysfs_create_file(&type->kobj, &mdev_type_attr_create.attr);
++	ret = sysfs_create_groups(&type->kobj, mdev_type_groups);
+ 	if (ret)
+ 		goto attr_create_failed;
+ 
+@@ -144,7 +165,7 @@ static struct mdev_type *add_mdev_supported_type(struct mdev_parent *parent,
+ attrs_failed:
+ 	kobject_put(type->devices_kobj);
+ attr_devices_failed:
+-	sysfs_remove_file(&type->kobj, &mdev_type_attr_create.attr);
++	sysfs_remove_groups(&type->kobj, mdev_type_groups);
+ attr_create_failed:
+ 	kobject_del(&type->kobj);
+ 	kobject_put(&type->kobj);
+diff --git a/include/linux/mdev.h b/include/linux/mdev.h
+index 15d03f6532d0..8a5fc5d54f9b 100644
+--- a/include/linux/mdev.h
++++ b/include/linux/mdev.h
+@@ -36,6 +36,7 @@ struct device *mtype_get_parent_dev(struct mdev_type *mtype);
+  *
+  * @owner:		The module owner.
+  * @device_driver:	Which device driver to probe() on newly created devices
++ * @device_api:		String to return for the device_api sysfs
+  * @dev_attr_groups:	Attributes of the parent device.
+  * @mdev_attr_groups:	Attributes of the mediated device.
+  * @supported_type_groups: Attributes to define supported types. It is mandatory
+@@ -80,6 +81,7 @@ struct device *mtype_get_parent_dev(struct mdev_type *mtype);
+ struct mdev_parent_ops {
+ 	struct module   *owner;
+ 	struct mdev_driver *device_driver;
++	const char *device_api;
+ 	const struct attribute_group **dev_attr_groups;
+ 	const struct attribute_group **mdev_attr_groups;
+ 	struct attribute_group **supported_type_groups;
+@@ -108,11 +110,6 @@ struct mdev_type_attribute {
+ 			 size_t count);
+ };
+ 
+-#define MDEV_TYPE_ATTR(_name, _mode, _show, _store)		\
+-struct mdev_type_attribute mdev_type_attr_##_name =		\
+-	__ATTR(_name, _mode, _show, _store)
+-#define MDEV_TYPE_ATTR_RW(_name) \
+-	struct mdev_type_attribute mdev_type_attr_##_name = __ATTR_RW(_name)
+ #define MDEV_TYPE_ATTR_RO(_name) \
+ 	struct mdev_type_attribute mdev_type_attr_##_name = __ATTR_RO(_name)
+ #define MDEV_TYPE_ATTR_WO(_name) \
+diff --git a/samples/vfio-mdev/mbochs.c b/samples/vfio-mdev/mbochs.c
+index e90c8552cc31..8d3ae97d9d6e 100644
+--- a/samples/vfio-mdev/mbochs.c
++++ b/samples/vfio-mdev/mbochs.c
+@@ -1358,17 +1358,9 @@ static ssize_t available_instances_show(struct mdev_type *mtype,
+ }
+ static MDEV_TYPE_ATTR_RO(available_instances);
+ 
+-static ssize_t device_api_show(struct mdev_type *mtype,
+-			       struct mdev_type_attribute *attr, char *buf)
+-{
+-	return sprintf(buf, "%s\n", VFIO_DEVICE_API_PCI_STRING);
+-}
+-static MDEV_TYPE_ATTR_RO(device_api);
+-
+ static struct attribute *mdev_types_attrs[] = {
+ 	&mdev_type_attr_name.attr,
+ 	&mdev_type_attr_description.attr,
+-	&mdev_type_attr_device_api.attr,
+ 	&mdev_type_attr_available_instances.attr,
+ 	NULL,
+ };
+@@ -1417,6 +1409,7 @@ static struct mdev_driver mbochs_driver = {
+ static const struct mdev_parent_ops mdev_fops = {
+ 	.owner			= THIS_MODULE,
+ 	.device_driver		= &mbochs_driver,
++	.device_api		= VFIO_DEVICE_API_PCI_STRING,
+ 	.supported_type_groups	= mdev_type_groups,
+ };
+ 
+diff --git a/samples/vfio-mdev/mdpy.c b/samples/vfio-mdev/mdpy.c
+index fe5d43e797b6..402a7ebe6563 100644
+--- a/samples/vfio-mdev/mdpy.c
++++ b/samples/vfio-mdev/mdpy.c
+@@ -670,17 +670,9 @@ static ssize_t available_instances_show(struct mdev_type *mtype,
+ }
+ static MDEV_TYPE_ATTR_RO(available_instances);
+ 
+-static ssize_t device_api_show(struct mdev_type *mtype,
+-			       struct mdev_type_attribute *attr, char *buf)
+-{
+-	return sprintf(buf, "%s\n", VFIO_DEVICE_API_PCI_STRING);
+-}
+-static MDEV_TYPE_ATTR_RO(device_api);
+-
+ static struct attribute *mdev_types_attrs[] = {
+ 	&mdev_type_attr_name.attr,
+ 	&mdev_type_attr_description.attr,
+-	&mdev_type_attr_device_api.attr,
+ 	&mdev_type_attr_available_instances.attr,
+ 	NULL,
+ };
+@@ -728,6 +720,7 @@ static struct mdev_driver mdpy_driver = {
+ static const struct mdev_parent_ops mdev_fops = {
+ 	.owner			= THIS_MODULE,
+ 	.device_driver          = &mdpy_driver,
++	.device_api		= VFIO_DEVICE_API_PCI_STRING,
+ 	.supported_type_groups	= mdev_type_groups,
+ };
+ 
+diff --git a/samples/vfio-mdev/mtty.c b/samples/vfio-mdev/mtty.c
+index a0e1a469bd47..5dc1b6a4c02c 100644
+--- a/samples/vfio-mdev/mtty.c
++++ b/samples/vfio-mdev/mtty.c
+@@ -1281,17 +1281,8 @@ static ssize_t available_instances_show(struct mdev_type *mtype,
+ 
+ static MDEV_TYPE_ATTR_RO(available_instances);
+ 
+-static ssize_t device_api_show(struct mdev_type *mtype,
+-			       struct mdev_type_attribute *attr, char *buf)
+-{
+-	return sprintf(buf, "%s\n", VFIO_DEVICE_API_PCI_STRING);
+-}
+-
+-static MDEV_TYPE_ATTR_RO(device_api);
+-
+ static struct attribute *mdev_types_attrs[] = {
+ 	&mdev_type_attr_name.attr,
+-	&mdev_type_attr_device_api.attr,
+ 	&mdev_type_attr_available_instances.attr,
+ 	NULL,
+ };
+@@ -1333,6 +1324,7 @@ static struct mdev_driver mtty_driver = {
+ static const struct mdev_parent_ops mdev_fops = {
+ 	.owner                  = THIS_MODULE,
+ 	.device_driver		= &mtty_driver,
++	.device_api		= VFIO_DEVICE_API_PCI_STRING,
+ 	.dev_attr_groups        = mtty_dev_groups,
+ 	.supported_type_groups  = mdev_type_groups,
+ };
+-- 
+2.34.1
+

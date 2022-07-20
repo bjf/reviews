@@ -1,0 +1,43 @@
+From bc7b6cf7f9549949d95c0582d0df57176181db5c Mon Sep 17 00:00:00 2001
+From: Nicolin Chen <nicolinc@nvidia.com>
+Date: Sat, 18 Jun 2022 17:52:27 -0700
+Subject: [PATCH 130/141] iommufd: Add iommu_stage1_config_smmu
+
+Define iommu_stage1_config_smmu for SMMUv3 stage1 info.
+
+Change-Id: I298ef4eb3a4cbbb9879e83bb5486ed444f7a2ed0
+Signed-off-by: Nicolin Chen <nicolinc@nvidia.com>
+
+15	0	include/uapi/linux/iommufd.h
+
+diff --git a/include/uapi/linux/iommufd.h b/include/uapi/linux/iommufd.h
+index a24a63ec3b94..008285650bc9 100644
+--- a/include/uapi/linux/iommufd.h
++++ b/include/uapi/linux/iommufd.h
+@@ -303,8 +303,23 @@ struct iommu_stage1_config_vtd {
+ 					 IOMMU_VTD_PGTBL_PCD |  \
+ 					 IOMMU_VTD_PGTBL_PWT)
+ 
++struct iommu_stage1_config_smmu {
++#define IOMMU_SMMU_FORMAT_SMMUV3	1
++	__u32 format;
++	__u32 vmid;
++#define IOMMU_SMMU_CONFIG_TRANSLATE	1
++#define IOMMU_SMMU_CONFIG_BYPASS	2
++#define IOMMU_SMMU_CONFIG_ABORT		3
++	__u32 config;
++	__u32 __reserved;
++	__u64 s1cdmax;
++	__u64 s1fmt;
++	__u64 s1dss;
++};
++
+ union iommu_stage1_config {
+ 	struct iommu_stage1_config_vtd vtd;
++	struct iommu_stage1_config_smmu smmu;
+ };
+ 
+ /**
+-- 
+2.34.1
+

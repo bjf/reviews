@@ -1,0 +1,53 @@
+From 243c97ed3992e847ef8d01595a884a4f7a5def45 Mon Sep 17 00:00:00 2001
+From: Lu Baolu <baolu.lu@linux.intel.com>
+Date: Tue, 7 Jun 2022 21:13:50 +0800
+Subject: [PATCH 099/141] iommu/vt-d: Fix list del corruption callback
+
+Could be folded into
+
+commit 90c11702f431 "iommu/vt-d: Add support for nested mode translation"
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+
+4	2	drivers/iommu/intel/nested.c
+1	0	include/linux/intel-iommu.h
+
+diff --git a/drivers/iommu/intel/nested.c b/drivers/iommu/intel/nested.c
+index 71ddc2531a4a..eeb1c6a03c22 100644
+--- a/drivers/iommu/intel/nested.c
++++ b/drivers/iommu/intel/nested.c
+@@ -62,7 +62,8 @@ static int intel_nested_attach_dev_pasid(struct iommu_domain *domain,
+ 		return ret;
+ 
+ 	mutex_lock(&ndomain->mutex);
+-	list_add(&info->nested, &ndomain->devices);
++	if (++info->nested_users == 1)
++		list_add(&info->nested, &ndomain->devices);
+ 	mutex_unlock(&ndomain->mutex);
+ 
+ 	return ret;
+@@ -81,7 +82,8 @@ static void intel_nested_detach_dev_pasid(struct iommu_domain *domain,
+ 	spin_unlock(&iommu->lock);
+ 
+ 	mutex_lock(&ndomain->mutex);
+-	list_del(&info->nested);
++	if (--info->nested_users == 0)
++		list_del(&info->nested);
+ 	mutex_unlock(&ndomain->mutex);
+ }
+ 
+diff --git a/include/linux/intel-iommu.h b/include/linux/intel-iommu.h
+index f14f14f0f20e..b2c2ae4e07bc 100644
+--- a/include/linux/intel-iommu.h
++++ b/include/linux/intel-iommu.h
+@@ -620,6 +620,7 @@ struct subdev_domain_info {
+ struct device_domain_info {
+ 	struct list_head link;	/* link to domain siblings */
+ 	struct list_head nested; /* link to nested domain siblings */
++	int nested_users;
+ 	struct list_head global; /* link to global list */
+ 	struct list_head table;	/* link to pasid table */
+ 	u32 segment;		/* PCI segment number */
+-- 
+2.34.1
+

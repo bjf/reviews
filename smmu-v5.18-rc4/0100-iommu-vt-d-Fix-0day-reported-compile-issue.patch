@@ -1,0 +1,30 @@
+From 778de1bd97840d2a0593c75cc7110de60a7e68a3 Mon Sep 17 00:00:00 2001
+From: Lu Baolu <baolu.lu@linux.intel.com>
+Date: Wed, 8 Jun 2022 10:50:19 +0800
+Subject: [PATCH 100/141] iommu/vt-d: Fix 0day reported compile issue
+
+In file included from drivers/base/platform.c:33:
+>> include/linux/iommu.h:1093:1: error: non-void function does not return a value [-Werror,-Wreturn-type]
+   }
+   ^
+   1 error generated.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+
+1	0	include/linux/iommu.h
+
+diff --git a/include/linux/iommu.h b/include/linux/iommu.h
+index 68a57cc51071..5abcf32a40b9 100644
+--- a/include/linux/iommu.h
++++ b/include/linux/iommu.h
+@@ -1090,6 +1090,7 @@ static inline struct iommu_domain *
+ iommu_alloc_nested_domain(struct bus_type *bus, struct iommu_domain *s2_domain,
+ 			  unsigned long s1_ptr, union iommu_stage1_config *cfg)
+ {
++	return NULL;
+ }
+ 
+ static inline void
+-- 
+2.34.1
+

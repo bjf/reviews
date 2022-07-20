@@ -1,0 +1,486 @@
+From 3937d44c3a7a9f5d1144070641d620644bf17582 Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Thu, 12 May 2022 03:20:11 -0700
+Subject: [PATCH 086/141] vfio: Rename VFIO_DEVICE_DETACH_IOAS to be
+ VFIO_DEVICE_DETACH_HWPT
+
+Togather with the change, vfio_device->ops.detach_ioas() is renamed to be
+detach_hwpt()
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+60	34	drivers/iommu/iommufd/vfio_compat.c
+1	1	drivers/vfio/pci/vfio_pci.c
+14	17	drivers/vfio/pci/vfio_pci_core.c
+16	10	drivers/vfio/vfio.c
+7	4	include/linux/iommufd.h
+2	2	include/linux/vfio.h
+3	3	include/linux/vfio_pci_core.h
+9	8	include/uapi/linux/vfio.h
+
+diff --git a/drivers/iommu/iommufd/vfio_compat.c b/drivers/iommu/iommufd/vfio_compat.c
+index 4539ff45efd9..35b373d2c0a0 100644
+--- a/drivers/iommu/iommufd/vfio_compat.c
++++ b/drivers/iommu/iommufd/vfio_compat.c
+@@ -404,28 +404,51 @@ int iommufd_vfio_ioctl(struct iommufd_ctx *ictx, unsigned int cmd,
+ 	return -ENOIOCTLCMD;
+ }
+ 
+-#define vfio_device_detach_unbind(ictx, id, device, device_list)               \
+-	({                                                                     \
+-		list_for_each_entry(device, device_list, group_next) {         \
+-			struct vfio_device_detach_ioas detach = {            \
+-				.argsz = sizeof(detach),                       \
+-				.ioas_id = id,                               \
+-				.iommufd = ictx->vfio_fd,                      \
+-			};                                                     \
+-			if (device->ops->detach_ioas)                        \
+-				device->ops->detach_ioas(device, &detach);   \
+-			if (device->ops->unbind_iommufd)                       \
+-				device->ops->unbind_iommufd(device);           \
+-		}                                                              \
+-	})
+-
+-struct iommufd_ctx *vfio_group_set_iommufd(int fd, struct list_head *device_list)
++static void vfio_device_detach_unbind(struct vfio_device *device,
++				      int iommufd, u32 id)
++{
++	struct vfio_device_detach_hwpt detach = {
++				.argsz = sizeof(detach),
++				.hwpt_id = id,
++				.iommufd = iommufd,
++				};
++
++	if (device->ops->detach_hwpt)
++		device->ops->detach_hwpt(device, &detach);
++	if (device->ops->unbind_iommufd)
++		device->ops->unbind_iommufd(device);
++}
++
++static int vfio_device_bind_attach(struct vfio_device *device,
++				   struct vfio_device_bind_iommufd *bind,
++				   struct vfio_device_attach_ioas *attach)
++{
++	int rc;
++
++	if (!device->ops->bind_iommufd || !device->ops->unbind_iommufd ||
++	    !device->ops->attach_ioas || !device->ops->detach_hwpt)
++		return -ENOENT;
++
++	rc = device->ops->bind_iommufd(device, bind);
++	if (rc)
++		return rc;
++
++	rc = device->ops->attach_ioas(device, attach);
++	if (rc)
++		device->ops->unbind_iommufd(device);
++
++	return rc;
++}
++
++struct iommufd_ctx *
++vfio_group_set_iommufd(int fd, struct list_head *device_list, u32 *hwpt_id)
+ {
+ 	struct vfio_device_attach_ioas attach = { .argsz = sizeof(attach) };
+ 	struct vfio_device_bind_iommufd bind = { .argsz = sizeof(bind) };
+ 	struct iommufd_ctx *ictx = iommufd_fget(fd);
+ 	struct iommufd_ioas *ioas;
+ 	struct vfio_device *device;
++	u32 pt_id;
+ 	int rc;
+ 
+ 	if (!ictx)
+@@ -450,31 +473,31 @@ struct iommufd_ctx *vfio_group_set_iommufd(int fd, struct list_head *device_list
+ 
+ 	ictx->vfio_ioas = ioas;
+ 	attach.ioas_id = ioas->obj.id;
++	attach.out_hwpt_id = IOMMUFD_INVALID_ID;
+ 
+ 	iommufd_put_object(&ioas->obj);
+ 
++	pt_id = IOMMUFD_INVALID_ID;
+ 	list_for_each_entry(device, device_list, group_next) {
+-		if (!device->ops->bind_iommufd || !device->ops->unbind_iommufd)
+-			goto cleanup_ioas;
+-
+-		rc = device->ops->bind_iommufd(device, &bind);
++		rc = vfio_device_bind_attach(device, &bind, &attach);
+ 		if (rc)
+-			goto cleanup_ioas;
+-
+-		if (unlikely(!device->ops->attach_ioas))
+-			goto cleanup_ioas;
++			goto unwind;
+ 
+-		rc = device->ops->attach_ioas(device, &attach);
+-		if (rc)
+-			goto cleanup_ioas;
++		if (pt_id == IOMMUFD_INVALID_ID)
++			pt_id = attach.out_hwpt_id;
++		else if (unlikely(pt_id != attach.out_hwpt_id)) {
++			vfio_device_detach_unbind(device, fd, attach.out_hwpt_id);
++			goto unwind;
++		}
+ 	}
+ 
++	*hwpt_id = pt_id;
+ 	ictx->groups++;
+ 	mutex_unlock(&ictx->vfio_compat);
+ 	return ictx;
+-
+-cleanup_ioas:
+-	vfio_device_detach_unbind(ictx, attach.ioas_id, device, device_list);
++unwind:
++	list_for_each_entry_continue_reverse(device, device_list, group_next)
++		vfio_device_detach_unbind(device, fd, pt_id);
+ 	iommufd_ioas_destroy(&ioas->obj);
+ out_fput:
+ 	mutex_unlock(&ictx->vfio_compat);
+@@ -484,12 +507,13 @@ struct iommufd_ctx *vfio_group_set_iommufd(int fd, struct list_head *device_list
+ }
+ EXPORT_SYMBOL_GPL(vfio_group_set_iommufd);
+ 
+-void vfio_group_unset_iommufd(void *iommufd, struct list_head *device_list)
++void vfio_group_unset_iommufd(void *iommufd, struct list_head *device_list,
++			      u32 hwpt_id)
+ {
+ 	struct iommufd_ctx *ictx = (struct iommufd_ctx *)iommufd;
+ 	struct iommufd_ioas *ioas;
+ 	struct vfio_device *device;
+-	unsigned int ioas_id;
++	int fd;
+ 
+ 	if (!ictx)
+ 		return;
+@@ -498,10 +522,12 @@ void vfio_group_unset_iommufd(void *iommufd, struct list_head *device_list)
+ 	if (IS_ERR(ioas))
+ 		return;
+ 
+-	ioas_id = ioas->obj.id;
++	fd = ictx->vfio_fd;
+ 	iommufd_put_object(&ioas->obj);
+ 
+-	vfio_device_detach_unbind(ictx, ioas_id, device, device_list);
++	list_for_each_entry(device, device_list, group_next)
++		vfio_device_detach_unbind(device, fd, hwpt_id);
++
+ 	if (--ictx->groups == 0)
+ 		iommufd_ioas_destroy(&ioas->obj);
+ 	mutex_unlock(&ictx->vfio_compat);
+diff --git a/drivers/vfio/pci/vfio_pci.c b/drivers/vfio/pci/vfio_pci.c
+index d12821987a1b..4ec675017e88 100644
+--- a/drivers/vfio/pci/vfio_pci.c
++++ b/drivers/vfio/pci/vfio_pci.c
+@@ -133,7 +133,7 @@ static const struct vfio_device_ops vfio_pci_ops = {
+ 	.open_device	= vfio_pci_open_device,
+ 	.close_device	= vfio_pci_core_close_device,
+ 	.attach_ioas	= vfio_pci_core_attach_ioas,
+-	.detach_ioas	= vfio_pci_core_detach_ioas,
++	.detach_hwpt	= vfio_pci_core_detach_hwpt,
+ 	.ioctl		= vfio_pci_core_ioctl,
+ 	.device_feature = vfio_pci_core_ioctl_feature,
+ 	.read		= vfio_pci_core_read,
+diff --git a/drivers/vfio/pci/vfio_pci_core.c b/drivers/vfio/pci/vfio_pci_core.c
+index 8237cd6cd4ee..ddf28d458d6b 100644
+--- a/drivers/vfio/pci/vfio_pci_core.c
++++ b/drivers/vfio/pci/vfio_pci_core.c
+@@ -660,8 +660,9 @@ int vfio_pci_core_bind_iommufd(struct vfio_device *core_vdev,
+ 		goto out_unlock;
+ 	}
+ 
++	vdev->iommufd = bind->iommufd;
+ 	vdev->idev = idev;
+-	vdev->ioas_id = IOMMUFD_INVALID_ID;
++	vdev->hwpt_id = IOMMUFD_INVALID_ID;
+ 	bind->out_devid = id;
+ 
+ out_unlock:
+@@ -677,9 +678,9 @@ void vfio_pci_core_unbind_iommufd(struct vfio_device *core_vdev)
+ 
+ 	mutex_lock(&vdev->idev_lock);
+ 	if (vdev->idev) {
+-		if (vdev->ioas_id != IOMMUFD_INVALID_ID) {
++		if (vdev->hwpt_id != IOMMUFD_INVALID_ID) {
+ 			vdev->iommufd = -1;
+-			vdev->ioas_id = IOMMUFD_INVALID_ID;
++			vdev->hwpt_id = IOMMUFD_INVALID_ID;
+ 			iommufd_device_detach(vdev->idev);
+ 		}
+ 		iommufd_unbind_device(vdev->idev);
+@@ -699,13 +700,13 @@ int vfio_pci_core_attach_ioas(struct vfio_device *core_vdev,
+ 
+ 	mutex_lock(&vdev->idev_lock);
+ 
+-	if (!vdev->idev) {
++	if (!vdev->idev || vdev->iommufd != attach->iommufd) {
+ 		ret = -EINVAL;
+ 		goto out_unlock;
+ 	}
+ 
+ 	/* Currently only allows one IOAS attach */
+-	if (vdev->ioas_id != IOMMUFD_INVALID_ID) {
++	if (vdev->hwpt_id != IOMMUFD_INVALID_ID) {
+ 		ret = -EBUSY;
+ 		goto out_unlock;
+ 	}
+@@ -719,8 +720,7 @@ int vfio_pci_core_attach_ioas(struct vfio_device *core_vdev,
+ 	if (ret)
+ 		goto out_unlock;
+ 
+-	vdev->iommufd = attach->iommufd;
+-	vdev->ioas_id = attach->ioas_id;
++	vdev->hwpt_id = pt_id;
+ 	attach->out_hwpt_id = pt_id;
+ 
+ out_unlock:
+@@ -730,29 +730,26 @@ int vfio_pci_core_attach_ioas(struct vfio_device *core_vdev,
+ }
+ EXPORT_SYMBOL_GPL(vfio_pci_core_attach_ioas);
+ 
+-void vfio_pci_core_detach_ioas(struct vfio_device *core_vdev,
+-			       struct vfio_device_detach_ioas *detach)
++void vfio_pci_core_detach_hwpt(struct vfio_device *core_vdev,
++			       struct vfio_device_detach_hwpt *detach)
+ {
+ 	struct vfio_pci_core_device *vdev =
+ 		container_of(core_vdev, struct vfio_pci_core_device, vdev);
+ 
+ 	mutex_lock(&vdev->idev_lock);
+ 
+-	if (vdev->ioas_id == IOMMUFD_INVALID_ID)
++	if (!vdev->idev ||
++	    vdev->iommufd != detach->iommufd ||
++	    vdev->hwpt_id != detach->hwpt_id)
+ 		goto out_unlock;
+ 
+-	if (vdev->iommufd != detach->iommufd ||
+-	    vdev->ioas_id != detach->ioas_id)
+-		goto out_unlock;
+-
+-	vdev->iommufd = -1;
+-	vdev->ioas_id = IOMMUFD_INVALID_ID;
++	vdev->hwpt_id = IOMMUFD_INVALID_ID;
+ 	iommufd_device_detach(vdev->idev);
+ 
+ out_unlock:
+ 	mutex_unlock(&vdev->idev_lock);
+ }
+-EXPORT_SYMBOL_GPL(vfio_pci_core_detach_ioas);
++EXPORT_SYMBOL_GPL(vfio_pci_core_detach_hwpt);
+ 
+ long vfio_pci_core_ioctl(struct vfio_device *core_vdev, unsigned int cmd,
+ 		unsigned long arg)
+diff --git a/drivers/vfio/vfio.c b/drivers/vfio/vfio.c
+index 5a8ac01aee82..7525be9e6f5e 100644
+--- a/drivers/vfio/vfio.c
++++ b/drivers/vfio/vfio.c
+@@ -85,6 +85,7 @@ struct vfio_group {
+ 	struct kvm			*kvm;
+ 	struct blocking_notifier_head	notifier;
+ 	void				*iommufd;
++	u32				hwpt_id;
+ };
+ 
+ #ifdef CONFIG_VFIO_NOIOMMU
+@@ -1092,7 +1093,9 @@ static void __vfio_group_unset_container(struct vfio_group *group)
+ 	struct vfio_iommu_driver *driver;
+ 
+ 	if (group->iommufd) {
+-		vfio_group_unset_iommufd(group->iommufd, &group->device_list);
++		vfio_group_unset_iommufd(group->iommufd,
++					 &group->device_list,
++					 group->hwpt_id);
+ 		group->iommufd = NULL;
+ 		wake_up(&group->container_q);
+ 		return;
+@@ -1161,6 +1164,7 @@ static int vfio_group_set_container(struct vfio_group *group, int container_fd)
+ 	struct fd f;
+ 	struct vfio_container *container;
+ 	struct vfio_iommu_driver *driver;
++	u32 hwpt_id;
+ 	int ret = 0;
+ 
+ 	if (atomic_read(&group->container_users))
+@@ -1170,9 +1174,11 @@ static int vfio_group_set_container(struct vfio_group *group, int container_fd)
+ 		return -EPERM;
+ 
+ 	group->iommufd = vfio_group_set_iommufd(container_fd,
+-						&group->device_list);
++						&group->device_list,
++						&hwpt_id);
+ 	if (group->iommufd) {
+ 		atomic_inc(&group->container_users);
++		group->hwpt_id = hwpt_id;
+ 		return ret;
+ 	}
+ 
+@@ -1876,28 +1882,28 @@ static long vfio_device_attach_ioas(struct vfio_device *device,
+ 			    sizeof(attach.out_hwpt_id)) ? -EFAULT : 0;
+ }
+ 
+-static long vfio_device_detach_ioas(struct vfio_device *device,
++static long vfio_device_detach_hwpt(struct vfio_device *device,
+ 				    unsigned long arg)
+ {
+-	struct vfio_device_detach_ioas detach;
++	struct vfio_device_detach_hwpt detach;
+ 	unsigned long minsz;
+ 
+-	minsz = offsetofend(struct vfio_device_detach_ioas, ioas_id);
++	minsz = offsetofend(struct vfio_device_detach_hwpt, hwpt_id);
+ 	if (copy_from_user(&detach, (void __user *)arg, minsz))
+ 		return -EFAULT;
+ 
+ 	if (detach.argsz < minsz || detach.flags ||
+-	    detach.iommufd < 0 || detach.ioas_id == IOMMUFD_INVALID_ID)
++	    detach.iommufd < 0 || detach.hwpt_id == IOMMUFD_INVALID_ID)
+ 		return -EINVAL;
+ 
+ 	/* not allowed if the device is opened in legacy interface */
+ 	if (vfio_device_in_container(device))
+ 		return -EBUSY;
+ 
+-	if (unlikely(!device->ops->detach_ioas))
++	if (unlikely(!device->ops->detach_hwpt))
+ 		return -EINVAL;
+ 
+-	device->ops->detach_ioas(device, &detach);
++	device->ops->detach_hwpt(device, &detach);
+ 
+ 	return 0;
+ }
+@@ -1920,8 +1926,8 @@ static long vfio_device_fops_unl_ioctl(struct file *filep,
+ 	switch (cmd) {
+ 	case VFIO_DEVICE_ATTACH_IOAS:
+ 		return vfio_device_attach_ioas(device, arg);
+-	case VFIO_DEVICE_DETACH_IOAS:
+-		return vfio_device_detach_ioas(device, arg);
++	case VFIO_DEVICE_DETACH_HWPT:
++		return vfio_device_detach_hwpt(device, arg);
+ 	case VFIO_DEVICE_FEATURE:
+ 		return vfio_ioctl_device_feature(device, (void __user *)arg);
+ 	default:
+diff --git a/include/linux/iommufd.h b/include/linux/iommufd.h
+index 8899db02110e..ffd9e1ff1101 100644
+--- a/include/linux/iommufd.h
++++ b/include/linux/iommufd.h
+@@ -29,8 +29,10 @@ int iommufd_device_attach(struct iommufd_device *idev, u32 *pt_id,
+ 			  unsigned int flags);
+ void iommufd_device_detach(struct iommufd_device *idev);
+ 
+-struct iommufd_ctx *vfio_group_set_iommufd(int fd, struct list_head *device_list);
+-void vfio_group_unset_iommufd(void *iommufd, struct list_head *device_list);
++struct iommufd_ctx *
++vfio_group_set_iommufd(int fd, struct list_head *device_list, u32 *hwpt_id);
++void vfio_group_unset_iommufd(void *iommufd, struct list_head *device_list,
++			      u32 hwpt_id);
+ int iommufd_vfio_check_extension(unsigned long type);
+ #else /* !CONFIG_IOMMUFD */
+ static inline struct iommufd_device *
+@@ -54,13 +56,14 @@ static inline void iommufd_device_detach(struct iommufd_device *idev)
+ }
+ 
+ static inline struct iommufd_ctx *
+-vfio_group_set_iommufd(int fd, struct list_head *device_list)
++vfio_group_set_iommufd(int fd, struct list_head *device_list, u32 *hwpt_id);
+ {
+ 	return NULL;
+ }
+ 
+ static inline void vfio_group_unset_iommufd(void *iommufd,
+-					    struct list_head *device_list)
++					    struct list_head *device_list,
++					    u32 hwpt_id);
+ {
+ }
+ 
+diff --git a/include/linux/vfio.h b/include/linux/vfio.h
+index 4d38d0be0280..e202d0ea06e2 100644
+--- a/include/linux/vfio.h
++++ b/include/linux/vfio.h
+@@ -80,8 +80,8 @@ struct vfio_device_ops {
+ 	void	(*unbind_iommufd)(struct vfio_device *vdev);
+ 	int	(*attach_ioas)(struct vfio_device *vdev,
+ 			       struct vfio_device_attach_ioas *attach);
+-	void	(*detach_ioas)(struct vfio_device *vdev,
+-			       struct vfio_device_detach_ioas *detach);
++	void	(*detach_hwpt)(struct vfio_device *vdev,
++			       struct vfio_device_detach_hwpt *detach);
+ 	int	(*open_device)(struct vfio_device *vdev);
+ 	void	(*close_device)(struct vfio_device *vdev);
+ 	void	(*release)(struct vfio_device *vdev);
+diff --git a/include/linux/vfio_pci_core.h b/include/linux/vfio_pci_core.h
+index 480907544f4c..ec4d1be393c7 100644
+--- a/include/linux/vfio_pci_core.h
++++ b/include/linux/vfio_pci_core.h
+@@ -143,7 +143,7 @@ struct vfio_pci_core_device {
+ 	struct mutex		idev_lock;
+ 	struct iommufd_device	*idev;
+ 	int			iommufd;
+-	u32			ioas_id;
++	u32			hwpt_id;
+ };
+ 
+ #define is_intx(vdev) (vdev->irq_type == VFIO_PCI_INTX_IRQ_INDEX)
+@@ -231,8 +231,8 @@ int vfio_pci_core_bind_iommufd(struct vfio_device *core_vdev,
+ void vfio_pci_core_unbind_iommufd(struct vfio_device *core_vdev);
+ int vfio_pci_core_attach_ioas(struct vfio_device *core_vdev,
+ 			      struct vfio_device_attach_ioas *attach);
+-void vfio_pci_core_detach_ioas(struct vfio_device *core_vdev,
+-			       struct vfio_device_detach_ioas *detach);
++void vfio_pci_core_detach_hwpt(struct vfio_device *core_vdev,
++			       struct vfio_device_detach_hwpt *detach);
+ void vfio_pci_core_close_device(struct vfio_device *core_vdev);
+ struct vfio_pci_core_device *
+ vfio_pci_core_alloc_device(struct pci_dev *pdev,
+diff --git a/include/uapi/linux/vfio.h b/include/uapi/linux/vfio.h
+index 972528bcdca6..474144d64c83 100644
+--- a/include/uapi/linux/vfio.h
++++ b/include/uapi/linux/vfio.h
+@@ -226,7 +226,7 @@ struct vfio_device_bind_iommufd {
+ #define VFIO_DEVICE_BIND_IOMMUFD	_IO(VFIO_TYPE, VFIO_BASE + 19)
+ 
+ /*
+- * VFIO_DEVICE_ATTACH_IOAS - _IOW(VFIO_TYPE, VFIO_BASE + 21,
++ * VFIO_DEVICE_ATTACH_IOAS - _IOW(VFIO_TYPE, VFIO_BASE + 20,
+  *				  struct vfio_device_attach_ioas)
+  *
+  * Attach a vfio device to the specified IOAS.
+@@ -253,26 +253,27 @@ struct vfio_device_attach_ioas {
+ #define VFIO_DEVICE_ATTACH_IOAS	_IO(VFIO_TYPE, VFIO_BASE + 20)
+ 
+ /*
+- * VFIO_DEVICE_DETACH_IOAS - _IOW(VFIO_TYPE, VFIO_BASE + 21,
+- *				  struct vfio_device_detach_ioas)
++ * VFIO_DEVICE_DETACH_HWPT - _IOW(VFIO_TYPE, VFIO_BASE + 21,
++ *				  struct vfio_device_detach_hwpt)
+  *
+- * Detach a vfio device from the specified IOAS.
++ * Detach a vfio device from the specified hardware page table.
+  *
+  * @argsz:	user filled size of this data.
+  * @flags:	reserved for future extension.
+  * @iommufd:	iommufd where the ioas comes from.
+- * @ioas_id:	Input the target I/O address space page table.
++ * @hwpt_id:	Input the target hwpt.
++ * @pasid:	Input a pasid.
+  *
+  * Return: 0 on success, -errno on failure.
+  */
+-struct vfio_device_detach_ioas {
++struct vfio_device_detach_hwpt {
+ 	__u32	argsz;
+ 	__u32	flags;
+ 	__s32	iommufd;
+-	__u32	ioas_id;
++	__u32	hwpt_id;
+ };
+ 
+-#define VFIO_DEVICE_DETACH_IOAS	_IO(VFIO_TYPE, VFIO_BASE + 21)
++#define VFIO_DEVICE_DETACH_HWPT	_IO(VFIO_TYPE, VFIO_BASE + 21)
+ 
+ /**
+  * VFIO_DEVICE_GET_INFO - _IOR(VFIO_TYPE, VFIO_BASE + 7,
+-- 
+2.34.1
+

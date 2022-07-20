@@ -1,0 +1,68 @@
+From 95405719282b736c61f0ee78c8ceb98bc003db99 Mon Sep 17 00:00:00 2001
+From: Lu Baolu <baolu.lu@linux.intel.com>
+Date: Mon, 28 Feb 2022 15:01:35 +0800
+Subject: [PATCH 032/141] iommu: Add pasid_bits field in struct dev_iommu
+
+Use this field to save the pasid/ssid bits that a device is able to
+support with its IOMMU hardware. It is a generic attribute of a device
+and lifting it into the per-device dev_iommu struct makes it possible
+to allocate a PASID for device without calls into the IOMMU drivers.
+Any iommu driver which suports PASID related features should set this
+field before features are enabled on the devices.
+
+For initialization of this field in the VT-d driver, the
+info->pasid_supported is only set for PCI devices. So the status is
+that non-PCI SVA hasn't been supported yet. Setting this field only for
+PCI devices has no functional change.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+
+2	0	drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+4	1	drivers/iommu/intel/iommu.c
+1	0	include/linux/iommu.h
+
+diff --git a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+index 627a3ed5ee8f..afc63fce6107 100644
+--- a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
++++ b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+@@ -2681,6 +2681,8 @@ static struct iommu_device *arm_smmu_probe_device(struct device *dev)
+ 	    smmu->features & ARM_SMMU_FEAT_STALL_FORCE)
+ 		master->stall_enabled = true;
+ 
++	dev->iommu->pasid_bits = master->ssid_bits;
++
+ 	return &smmu->iommu;
+ 
+ err_free_master:
+diff --git a/drivers/iommu/intel/iommu.c b/drivers/iommu/intel/iommu.c
+index 2990f80c5e08..99643f897f26 100644
+--- a/drivers/iommu/intel/iommu.c
++++ b/drivers/iommu/intel/iommu.c
+@@ -4624,8 +4624,11 @@ static struct iommu_device *intel_iommu_probe_device(struct device *dev)
+ 			if (pasid_supported(iommu)) {
+ 				int features = pci_pasid_features(pdev);
+ 
+-				if (features >= 0)
++				if (features >= 0) {
+ 					info->pasid_supported = features | 1;
++					dev->iommu->pasid_bits =
++						fls(pci_max_pasids(pdev)) - 1;
++				}
+ 			}
+ 
+ 			if (info->ats_supported && ecap_prs(iommu->ecap) &&
+diff --git a/include/linux/iommu.h b/include/linux/iommu.h
+index 5e1afe169549..b8ffaf2cb1d0 100644
+--- a/include/linux/iommu.h
++++ b/include/linux/iommu.h
+@@ -373,6 +373,7 @@ struct dev_iommu {
+ 	struct iommu_fwspec		*fwspec;
+ 	struct iommu_device		*iommu_dev;
+ 	void				*priv;
++	unsigned int			pasid_bits;
+ };
+ 
+ int iommu_device_register(struct iommu_device *iommu,
+-- 
+2.34.1
+

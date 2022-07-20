@@ -1,0 +1,138 @@
+From aec6c391a93a1e01b365d0a6ad3cbcb6f623890c Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Tue, 9 Nov 2021 16:55:57 +0800
+Subject: [PATCH 064/141] vfio: Add vfio_alloc/put_device()
+
+The idea is to let vfio core manage the vfio_device allocation/free and
+allows the vfio_device users prvoides a release op in vfio_device_ops to
+callback into the users to do user specific things before the vfio_device
+struct can be freed.
+
+*) vfio_alloc_device() does a device_initialize()
+*) vfio_put_device() does a device_put() which is supposed to trigger
+   vfio_device_release()
+
+Suggested-by: Jason Gunthorpe <jgg@nvidia.com>
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+57	0	drivers/vfio/vfio.c
+14	1	include/linux/vfio.h
+
+diff --git a/drivers/vfio/vfio.c b/drivers/vfio/vfio.c
+index 98bd6045b4d9..2065c4fbaf80 100644
+--- a/drivers/vfio/vfio.c
++++ b/drivers/vfio/vfio.c
+@@ -495,6 +495,63 @@ static struct vfio_device *vfio_group_get_device(struct vfio_group *group,
+ /*
+  * VFIO driver API
+  */
++static void vfio_device_release(struct kref *kref)
++{
++	struct vfio_device *device = container_of(kref, struct vfio_device, kref);
++
++	vfio_release_device_set(device);
++
++	if (device->ops && device->ops->release)
++		device->ops->release(device);
++
++	kfree(device);
++}
++
++/*
++ * _vfio_alloc_device - allocate a vfio_device struct
++ * @size: size of structure to allocate
++ *
++ * Drivers using vfio_device should use vfio_alloc_device() to allocate
++ * &struct vfio_device. @size is the size of the structure to be allocated,
++ * including any private data used by the driver.
++ * vfio_put_device() must be used to free structures allocated with
++ * vfio_alloc_device().
++ */
++struct vfio_device *_vfio_alloc_device(size_t size, struct device *dev,
++				       const struct vfio_device_ops *ops)
++{
++	struct vfio_device *device;
++
++	if (WARN_ON(size < sizeof(struct vfio_device)))
++		return NULL;
++
++	device = kzalloc(size, GFP_KERNEL);
++	if (!device)
++		return NULL;
++
++	init_completion(&device->comp);
++	device->dev = dev;
++	device->ops = ops;
++
++	kref_init(&device->kref);
++
++	return device;
++}
++EXPORT_SYMBOL(_vfio_alloc_device);
++
++/*
++ * vfio_put_device - free a vfio_device struct
++ * @device: structure to free
++ *
++ * Free a structure allocated with vfio_alloc_device().
++ */
++void vfio_put_device(struct vfio_device *device)
++{
++	/* Balances with kref_init in _vfio_alloc_device() */
++	kref_put(&device->kref, vfio_device_release);
++}
++EXPORT_SYMBOL(vfio_put_device);
++
+ void vfio_init_group_dev(struct vfio_device *device, struct device *dev,
+ 			 const struct vfio_device_ops *ops)
+ {
+diff --git a/include/linux/vfio.h b/include/linux/vfio.h
+index bcd6eaaea9a5..c0effeb99d21 100644
+--- a/include/linux/vfio.h
++++ b/include/linux/vfio.h
+@@ -36,7 +36,8 @@ struct vfio_device {
+ 	unsigned int migration_flags;
+ 
+ 	/* Members below here are private, not for driver use */
+-	refcount_t refcount;
++	struct kref kref; /* object life circle */
++	refcount_t refcount; /* user count */
+ 	unsigned int open_count;
+ 	struct completion comp;
+ 	struct list_head group_next;
+@@ -47,6 +48,7 @@ struct vfio_device {
+  *
+  * @open_device: Called when the first file descriptor is opened for this device
+  * @close_device: Opposite of open_device
++ * @release: Reclaim private fields in device state structure
+  * @read: Perform read(2) on device file descriptor
+  * @write: Perform write(2) on device file descriptor
+  * @ioctl: Perform ioctl(2) on device file descriptor, supporting VFIO_DEVICE_*
+@@ -72,6 +74,7 @@ struct vfio_device_ops {
+ 	char	*name;
+ 	int	(*open_device)(struct vfio_device *vdev);
+ 	void	(*close_device)(struct vfio_device *vdev);
++	void	(*release)(struct vfio_device *vdev);
+ 	ssize_t	(*read)(struct vfio_device *vdev, char __user *buf,
+ 			size_t count, loff_t *ppos);
+ 	ssize_t	(*write)(struct vfio_device *vdev, const char __user *buf,
+@@ -119,6 +122,16 @@ static inline int vfio_check_feature(u32 flags, size_t argsz, u32 supported_ops,
+ 	return 1;
+ }
+ 
++struct vfio_device *_vfio_alloc_device(size_t size, struct device *dev,
++				       const struct vfio_device_ops *ops);
++#define vfio_alloc_device(dev_struct, member, __dev, __ops)			\
++	container_of(_vfio_alloc_device(sizeof(struct dev_struct) +		\
++					BUILD_BUG_ON_ZERO(offsetof(		\
++						struct dev_struct, member)),	\
++					__dev, __ops),				\
++		     struct dev_struct, member)
++
++void vfio_put_device(struct vfio_device *device);
+ void vfio_init_group_dev(struct vfio_device *device, struct device *dev,
+ 			 const struct vfio_device_ops *ops);
+ void vfio_uninit_group_dev(struct vfio_device *device);
+-- 
+2.34.1
+

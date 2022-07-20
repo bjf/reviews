@@ -1,0 +1,84 @@
+From fbc2a140ad9dd50c75dc435e0e05e292b502eec2 Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Thu, 12 May 2022 04:20:00 -0700
+Subject: [PATCH 107/141] iommufd: Add cache invalidation support for hwpt
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+29	0	drivers/iommu/iommufd/hw_pagetable.c
+1	0	drivers/iommu/iommufd/iommufd_private.h
+3	0	drivers/iommu/iommufd/main.c
+
+diff --git a/drivers/iommu/iommufd/hw_pagetable.c b/drivers/iommu/iommufd/hw_pagetable.c
+index 1fdb084096c6..2525bbc51d0c 100644
+--- a/drivers/iommu/iommufd/hw_pagetable.c
++++ b/drivers/iommu/iommufd/hw_pagetable.c
+@@ -505,3 +505,32 @@ int iommufd_alloc_s1_hwpt(struct iommufd_ucmd *ucmd)
+ 	iommufd_put_object(stage2_obj);
+ 	return rc;
+ }
++
++int iommufd_hwpt_invalidate_cache(struct iommufd_ucmd *ucmd)
++{
++	struct iommu_hwpt_invalidate_s1_cache *cmd = ucmd->cmd;
++	struct iommufd_object *obj;
++	struct iommufd_hw_pagetable *hwpt;
++	int rc = 0;
++
++	if (cmd->flags)
++		return -EOPNOTSUPP;
++
++	/* TODO: more sanity check when the struct is finalized */
++	obj = iommufd_get_object(ucmd->ictx, cmd->hwpt_id,
++				 IOMMUFD_OBJ_HW_PAGETABLE_S1);
++	if (IS_ERR(obj))
++		return PTR_ERR(obj);
++
++	hwpt = container_of(obj, struct iommufd_hw_pagetable, obj);
++	if (hwpt->type != IOMMUFD_HWPT_USER_S1) {
++		rc = -EINVAL;
++		goto out_put;
++	}
++
++	iommu_domain_cache_inv(hwpt->domain, &cmd->info);
++
++out_put:
++	iommufd_put_object(obj);
++	return rc;
++}
+diff --git a/drivers/iommu/iommufd/iommufd_private.h b/drivers/iommu/iommufd/iommufd_private.h
+index d8925dcc6c41..f160654dc9a2 100644
+--- a/drivers/iommu/iommufd/iommufd_private.h
++++ b/drivers/iommu/iommufd/iommufd_private.h
+@@ -219,6 +219,7 @@ int iommufd_ioas_unmap(struct iommufd_ucmd *ucmd);
+ int iommufd_vfio_ioas(struct iommufd_ucmd *ucmd);
+ int iommufd_device_get_info(struct iommufd_ucmd *ucmd);
+ int iommufd_alloc_s1_hwpt(struct iommufd_ucmd *ucmd);
++int iommufd_hwpt_invalidate_cache(struct iommufd_ucmd *ucmd);
+ 
+ struct iommufd_hw_pagetable_kernel {
+ 	struct iommufd_ioas *ioas;
+diff --git a/drivers/iommu/iommufd/main.c b/drivers/iommu/iommufd/main.c
+index 79659c472b17..f5b34d8bfb00 100644
+--- a/drivers/iommu/iommufd/main.c
++++ b/drivers/iommu/iommufd/main.c
+@@ -193,6 +193,7 @@ union ucmd_buffer {
+ 	struct iommu_ioas_map map;
+ 	struct iommu_ioas_unmap unmap;
+ 	struct iommu_alloc_s1_hwpt s1_hwpt;
++	struct iommu_hwpt_invalidate_s1_cache cache;
+ 	struct iommu_destroy destroy;
+ 	struct iommu_device_info info;
+ #ifdef CONFIG_IOMMUFD_TEST
+@@ -234,6 +235,8 @@ static struct iommufd_ioctl_op iommufd_ioctl_ops[] = {
+ 		 hw_data_ptr),
+ 	IOCTL_OP(IOMMU_ALLOC_S1_HWPT, iommufd_alloc_s1_hwpt, struct iommu_alloc_s1_hwpt,
+ 		 out_hwpt_id),
++	IOCTL_OP(IOMMU_HWPT_INVAL_S1_CACHE, iommufd_hwpt_invalidate_cache,
++		 struct iommu_hwpt_invalidate_s1_cache, info),
+ #ifdef CONFIG_IOMMUFD_TEST
+ 	IOCTL_OP(IOMMU_TEST_CMD, iommufd_test, struct iommu_test_cmd, last),
+ #endif
+-- 
+2.34.1
+

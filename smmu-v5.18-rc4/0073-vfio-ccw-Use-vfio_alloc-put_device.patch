@@ -1,0 +1,174 @@
+From a85d273fb0aa8fa7452204d9d48ba5a2d0b6bd88 Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Fri, 26 Nov 2021 16:15:38 +0800
+Subject: [PATCH 073/141] vfio/ccw: Use vfio_alloc/put_device()
+
+Use vfio_alloc/put_device() for the vfio_ccw_private allocation, and moves
+the io_mutex destroy and the free of crw_region, schib_region, cmd_region,
+io_region and cp.guest_cp into the vfio_ccw_release(). As the vfio ccw uses
+kfree_rcu() to solve a race, so the vfio core needs to use kfree_rcu() as
+well.
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+27	28	drivers/s390/cio/vfio_ccw_drv.c
+0	2	drivers/s390/cio/vfio_ccw_private.h
+1	1	drivers/vfio/vfio.c
+1	0	include/linux/vfio.h
+
+diff --git a/drivers/s390/cio/vfio_ccw_drv.c b/drivers/s390/cio/vfio_ccw_drv.c
+index 6a9771c24cc3..5725bc0534a5 100644
+--- a/drivers/s390/cio/vfio_ccw_drv.c
++++ b/drivers/s390/cio/vfio_ccw_drv.c
+@@ -97,17 +97,33 @@ static void vfio_ccw_sch_irq(struct subchannel *sch)
+ 	vfio_device_put(&private->vdev);
+ }
+ 
++static void vfio_ccw_release(struct vfio_device *vdev)
++{
++	struct vfio_ccw_private *private =
++		container_of(vdev, struct vfio_ccw_private, vdev);
++
++	if (private->crw_region)
++		kmem_cache_free(vfio_ccw_crw_region, private->crw_region);
++	if (private->schib_region)
++		kmem_cache_free(vfio_ccw_schib_region, private->schib_region);
++	if (private->cmd_region)
++		kmem_cache_free(vfio_ccw_cmd_region, private->cmd_region);
++	if (private->io_region)
++		kmem_cache_free(vfio_ccw_io_region, private->io_region);
++	kfree(private->cp.guest_cp);
++	mutex_destroy(&private->io_mutex);
++}
++
+ struct vfio_ccw_private *vfio_ccw_alloc_private(struct mdev_device *mdev,
+ 						struct subchannel *sch)
+ {
+ 	struct vfio_ccw_private *private;
+ 
+-	private = kzalloc(sizeof(*private), GFP_KERNEL);
++	private = vfio_alloc_device(vfio_ccw_private, vdev,
++				    &mdev->dev, &vfio_ccw_dev_ops);
+ 	if (!private)
+ 		return ERR_PTR(-ENOMEM);
+ 
+-	vfio_init_group_dev(&private->vdev, &mdev->dev,
+-			    &vfio_ccw_dev_ops);
+ 	private->sch = sch;
+ 	mutex_init(&private->io_mutex);
+ 	private->state = VFIO_CCW_STATE_CLOSED;
+@@ -118,43 +134,33 @@ struct vfio_ccw_private *vfio_ccw_alloc_private(struct mdev_device *mdev,
+ 	private->cp.guest_cp = kcalloc(CCWCHAIN_LEN_MAX, sizeof(struct ccw1),
+ 				       GFP_KERNEL);
+ 	if (!private->cp.guest_cp)
+-		goto out_free_private;
++		goto err_out;
+ 
+ 	private->io_region = kmem_cache_zalloc(vfio_ccw_io_region,
+ 					       GFP_KERNEL | GFP_DMA);
+ 	if (!private->io_region)
+-		goto out_free_cp;
++		goto err_out;
+ 
+ 	private->cmd_region = kmem_cache_zalloc(vfio_ccw_cmd_region,
+ 						GFP_KERNEL | GFP_DMA);
+ 	if (!private->cmd_region)
+-		goto out_free_io;
++		goto err_out;
+ 
+ 	private->schib_region = kmem_cache_zalloc(vfio_ccw_schib_region,
+ 						  GFP_KERNEL | GFP_DMA);
+ 
+ 	if (!private->schib_region)
+-		goto out_free_cmd;
++		goto err_out;
+ 
+ 	private->crw_region = kmem_cache_zalloc(vfio_ccw_crw_region,
+ 						GFP_KERNEL | GFP_DMA);
+ 
+ 	if (!private->crw_region)
+-		goto out_free_schib;
++		goto err_out;
+ 	return private;
+ 
+-out_free_schib:
+-	kmem_cache_free(vfio_ccw_schib_region, private->schib_region);
+-out_free_cmd:
+-	kmem_cache_free(vfio_ccw_cmd_region, private->cmd_region);
+-out_free_io:
+-	kmem_cache_free(vfio_ccw_io_region, private->io_region);
+-out_free_cp:
+-	kfree(private->cp.guest_cp);
+-out_free_private:
+-	mutex_destroy(&private->io_mutex);
+-	vfio_uninit_group_dev(&private->vdev);
+-	kfree(private);
++err_out:
++	vfio_put_device(&private->vdev);
+ 	return ERR_PTR(-ENOMEM);
+ }
+ 
+@@ -167,14 +173,7 @@ void vfio_ccw_free_private(struct vfio_ccw_private *private)
+ 		kfree(crw);
+ 	}
+ 
+-	kmem_cache_free(vfio_ccw_crw_region, private->crw_region);
+-	kmem_cache_free(vfio_ccw_schib_region, private->schib_region);
+-	kmem_cache_free(vfio_ccw_cmd_region, private->cmd_region);
+-	kmem_cache_free(vfio_ccw_io_region, private->io_region);
+-	kfree(private->cp.guest_cp);
+-	mutex_destroy(&private->io_mutex);
+-	vfio_uninit_group_dev(&private->vdev);
+-	kfree_rcu(private, rcu);
++	vfio_put_device(&private->vdev);
+ }
+ 
+ static int vfio_ccw_sch_probe(struct subchannel *sch)
+diff --git a/drivers/s390/cio/vfio_ccw_private.h b/drivers/s390/cio/vfio_ccw_private.h
+index 852ff94fc107..ce40430cc3bf 100644
+--- a/drivers/s390/cio/vfio_ccw_private.h
++++ b/drivers/s390/cio/vfio_ccw_private.h
+@@ -71,7 +71,6 @@ struct vfio_ccw_crw {
+ /**
+  * struct vfio_ccw_private
+  * @vdev: Embedded VFIO device
+- * @rcu: head for kfree_rcu()
+  * @sch: pointer to the subchannel
+  * @state: internal state of the device
+  * @completion: synchronization helper of the I/O completion
+@@ -94,7 +93,6 @@ struct vfio_ccw_crw {
+  */
+ struct vfio_ccw_private {
+ 	struct vfio_device vdev;
+-	struct rcu_head rcu;
+ 	struct subchannel	*sch;
+ 	int			state;
+ 	struct completion	*completion;
+diff --git a/drivers/vfio/vfio.c b/drivers/vfio/vfio.c
+index 2065c4fbaf80..cc5d9257be31 100644
+--- a/drivers/vfio/vfio.c
++++ b/drivers/vfio/vfio.c
+@@ -504,7 +504,7 @@ static void vfio_device_release(struct kref *kref)
+ 	if (device->ops && device->ops->release)
+ 		device->ops->release(device);
+ 
+-	kfree(device);
++	kfree_rcu(device, rcu);
+ }
+ 
+ /*
+diff --git a/include/linux/vfio.h b/include/linux/vfio.h
+index c0effeb99d21..417c4b140855 100644
+--- a/include/linux/vfio.h
++++ b/include/linux/vfio.h
+@@ -37,6 +37,7 @@ struct vfio_device {
+ 
+ 	/* Members below here are private, not for driver use */
+ 	struct kref kref; /* object life circle */
++	struct rcu_head rcu;
+ 	refcount_t refcount; /* user count */
+ 	unsigned int open_count;
+ 	struct completion comp;
+-- 
+2.34.1
+

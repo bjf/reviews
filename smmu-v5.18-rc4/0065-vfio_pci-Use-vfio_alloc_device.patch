@@ -1,0 +1,143 @@
+From ee82da78dd889745c180165992d1540f64d86c68 Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Mon, 22 Nov 2021 16:50:10 +0800
+Subject: [PATCH 065/141] vfio_pci: Use vfio_alloc_device()
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+4	6	drivers/vfio/pci/vfio_pci.c
+27	10	drivers/vfio/pci/vfio_pci_core.c
+5	4	include/linux/vfio_pci_core.h
+
+diff --git a/drivers/vfio/pci/vfio_pci.c b/drivers/vfio/pci/vfio_pci.c
+index 58839206d1ca..129b18ede2ce 100644
+--- a/drivers/vfio/pci/vfio_pci.c
++++ b/drivers/vfio/pci/vfio_pci.c
+@@ -127,6 +127,7 @@ static int vfio_pci_open_device(struct vfio_device *core_vdev)
+ 
+ static const struct vfio_device_ops vfio_pci_ops = {
+ 	.name		= "vfio-pci",
++	.release	= vfio_pci_core_release,
+ 	.open_device	= vfio_pci_open_device,
+ 	.close_device	= vfio_pci_core_close_device,
+ 	.ioctl		= vfio_pci_core_ioctl,
+@@ -146,10 +147,9 @@ static int vfio_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ 	if (vfio_pci_is_denylisted(pdev))
+ 		return -EINVAL;
+ 
+-	vdev = kzalloc(sizeof(*vdev), GFP_KERNEL);
++	vdev = vfio_pci_core_alloc_device(pdev, &vfio_pci_ops);
+ 	if (!vdev)
+ 		return -ENOMEM;
+-	vfio_pci_core_init_device(vdev, pdev, &vfio_pci_ops);
+ 
+ 	ret = vfio_pci_core_register_device(vdev);
+ 	if (ret)
+@@ -158,8 +158,7 @@ static int vfio_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ 	return 0;
+ 
+ out_free:
+-	vfio_pci_core_uninit_device(vdev);
+-	kfree(vdev);
++	vfio_pci_core_dealloc_device(vdev);
+ 	return ret;
+ }
+ 
+@@ -168,8 +167,7 @@ static void vfio_pci_remove(struct pci_dev *pdev)
+ 	struct vfio_pci_core_device *vdev = dev_get_drvdata(&pdev->dev);
+ 
+ 	vfio_pci_core_unregister_device(vdev);
+-	vfio_pci_core_uninit_device(vdev);
+-	kfree(vdev);
++	vfio_pci_core_dealloc_device(vdev);
+ }
+ 
+ static int vfio_pci_sriov_configure(struct pci_dev *pdev, int nr_virtfn)
+diff --git a/drivers/vfio/pci/vfio_pci_core.c b/drivers/vfio/pci/vfio_pci_core.c
+index 06b6f3594a13..1310856a65e0 100644
+--- a/drivers/vfio/pci/vfio_pci_core.c
++++ b/drivers/vfio/pci/vfio_pci_core.c
+@@ -1786,11 +1786,17 @@ static void vfio_pci_vga_uninit(struct vfio_pci_core_device *vdev)
+ 					      VGA_RSRC_LEGACY_MEM);
+ }
+ 
+-void vfio_pci_core_init_device(struct vfio_pci_core_device *vdev,
+-			       struct pci_dev *pdev,
+-			       const struct vfio_device_ops *vfio_pci_ops)
++struct vfio_pci_core_device *
++vfio_pci_core_alloc_device(struct pci_dev *pdev,
++			   const struct vfio_device_ops *vfio_pci_ops)
+ {
+-	vfio_init_group_dev(&vdev->vdev, &pdev->dev, vfio_pci_ops);
++	struct vfio_pci_core_device *vdev;
++
++	vdev = vfio_alloc_device(vfio_pci_core_device, vdev,
++				 &pdev->dev, vfio_pci_ops);
++	if (!vdev)
++		goto out;
++
+ 	vdev->pdev = pdev;
+ 	vdev->irq_type = VFIO_PCI_NUM_IRQS;
+ 	mutex_init(&vdev->igate);
+@@ -1802,19 +1808,30 @@ void vfio_pci_core_init_device(struct vfio_pci_core_device *vdev,
+ 	INIT_LIST_HEAD(&vdev->vma_list);
+ 	INIT_LIST_HEAD(&vdev->sriov_pfs_item);
+ 	init_rwsem(&vdev->memory_lock);
++
++out:
++	return vdev;
++}
++EXPORT_SYMBOL_GPL(vfio_pci_core_alloc_device);
++
++void vfio_pci_core_release(struct vfio_device *core_dev)
++{
++	struct vfio_pci_core_device *vdev =
++		container_of(core_dev, struct vfio_pci_core_device, vdev);
++
++	kfree(vdev->region);
++	kfree(vdev->pm_save);
+ }
+-EXPORT_SYMBOL_GPL(vfio_pci_core_init_device);
++EXPORT_SYMBOL_GPL(vfio_pci_core_release);
+ 
+-void vfio_pci_core_uninit_device(struct vfio_pci_core_device *vdev)
++void vfio_pci_core_dealloc_device(struct vfio_pci_core_device *vdev)
+ {
+ 	mutex_destroy(&vdev->igate);
+ 	mutex_destroy(&vdev->ioeventfds_lock);
+ 	mutex_destroy(&vdev->vma_lock);
+-	vfio_uninit_group_dev(&vdev->vdev);
+-	kfree(vdev->region);
+-	kfree(vdev->pm_save);
++	vfio_put_device(&vdev->vdev);
+ }
+-EXPORT_SYMBOL_GPL(vfio_pci_core_uninit_device);
++EXPORT_SYMBOL_GPL(vfio_pci_core_dealloc_device);
+ 
+ int vfio_pci_core_register_device(struct vfio_pci_core_device *vdev)
+ {
+diff --git a/include/linux/vfio_pci_core.h b/include/linux/vfio_pci_core.h
+index 48f2dd3c568c..048a5d6fccad 100644
+--- a/include/linux/vfio_pci_core.h
++++ b/include/linux/vfio_pci_core.h
+@@ -220,12 +220,13 @@ static inline int vfio_pci_info_zdev_add_caps(struct vfio_pci_core_device *vdev,
+ /* Will be exported for vfio pci drivers usage */
+ void vfio_pci_core_set_params(bool nointxmask, bool is_disable_vga,
+ 			      bool is_disable_idle_d3);
++void vfio_pci_core_release(struct vfio_device *core_dev);
+ void vfio_pci_core_close_device(struct vfio_device *core_vdev);
+-void vfio_pci_core_init_device(struct vfio_pci_core_device *vdev,
+-			       struct pci_dev *pdev,
+-			       const struct vfio_device_ops *vfio_pci_ops);
++struct vfio_pci_core_device *
++vfio_pci_core_alloc_device(struct pci_dev *pdev,
++			   const struct vfio_device_ops *vfio_pci_ops);
+ int vfio_pci_core_register_device(struct vfio_pci_core_device *vdev);
+-void vfio_pci_core_uninit_device(struct vfio_pci_core_device *vdev);
++void vfio_pci_core_dealloc_device(struct vfio_pci_core_device *vdev);
+ void vfio_pci_core_unregister_device(struct vfio_pci_core_device *vdev);
+ int vfio_pci_core_sriov_configure(struct pci_dev *pdev, int nr_virtfn);
+ extern const struct pci_error_handlers vfio_pci_core_err_handlers;
+-- 
+2.34.1
+

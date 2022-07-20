@@ -1,0 +1,66 @@
+From 25f340619f2b68eb717ca7e368378a057c93bd34 Mon Sep 17 00:00:00 2001
+From: Nicolin Chen <nicolinc@nvidia.com>
+Date: Wed, 6 Jul 2022 19:48:42 -0700
+Subject: [PATCH 132/141] iommu/arm-smmu-v3: Remove ARM_SMMU_DOMAIN_NESTED
+
+The new IOMMUFD designs nesting setup using two iommu_domain pointers,
+corresponding to stage S1 and stage S2. The S1 iommu_domain having a
+type of IOMMU_DOMAIN_NESTING is a virtual object that represents the
+iommu_domain in the guest, which a passthrough device can attach onto.
+And the S2 domain is separately owned by the hypervisor, handling the
+stage-2 IO page table.
+
+Remove ARM_SMMU_DOMAIN_NESTED, will add back new IOMMU_DOMAIN_NESTING
+in the following patches. Also, set ARM_SMMU_DOMAIN_S2 accordingly for
+a hypervisor to allocate a stage-2 page table.
+
+Change-Id: I48c82b1bbaddc7d5bf8c7daaad3b23a42348d9c6
+Signed-off-by: Nicolin Chen <nicolinc@nvidia.com>
+
+1	3	drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+0	1	drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h
+
+diff --git a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+index 7b618e44b384..86a4d6f01b00 100644
+--- a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
++++ b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+@@ -1281,7 +1281,6 @@ static void arm_smmu_write_strtab_ent(struct arm_smmu_master *master, u32 sid,
+ 			s1_cfg = &smmu_domain->s1_cfg;
+ 			break;
+ 		case ARM_SMMU_DOMAIN_S2:
+-		case ARM_SMMU_DOMAIN_NESTED:
+ 			s2_cfg = &smmu_domain->s2_cfg;
+ 			break;
+ 		default:
+@@ -2214,7 +2213,6 @@ static int arm_smmu_domain_finalise(struct iommu_domain *domain,
+ 		fmt = ARM_64_LPAE_S1;
+ 		finalise_stage_fn = arm_smmu_domain_finalise_s1;
+ 		break;
+-	case ARM_SMMU_DOMAIN_NESTED:
+ 	case ARM_SMMU_DOMAIN_S2:
+ 		ias = smmu->ias;
+ 		oas = smmu->oas;
+@@ -2770,7 +2768,7 @@ static int arm_smmu_enable_nesting(struct iommu_domain *domain)
+ 	if (smmu_domain->smmu)
+ 		ret = -EPERM;
+ 	else
+-		smmu_domain->stage = ARM_SMMU_DOMAIN_NESTED;
++		smmu_domain->stage = ARM_SMMU_DOMAIN_S2;
+ 	mutex_unlock(&smmu_domain->init_mutex);
+ 
+ 	return ret;
+diff --git a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h
+index 2513309ec0db..95dc8ac8965e 100644
+--- a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h
++++ b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h
+@@ -702,7 +702,6 @@ struct arm_smmu_master {
+ enum arm_smmu_domain_stage {
+ 	ARM_SMMU_DOMAIN_S1 = 0,
+ 	ARM_SMMU_DOMAIN_S2,
+-	ARM_SMMU_DOMAIN_NESTED,
+ 	ARM_SMMU_DOMAIN_BYPASS,
+ };
+ 
+-- 
+2.34.1
+

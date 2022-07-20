@@ -1,0 +1,365 @@
+From 0e5cd13a0bb6ae3fa501e6b50e48a740fcc1a336 Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Tue, 10 May 2022 19:58:40 -0700
+Subject: [PATCH 110/141] vfio/pci: Add VFIO_DEVICE_ATTACH_HWPT
+
+For iommu nested translation, userspace owns stage1 translation structure.
+Userspace empowers the nested translation for specific device by attaching
+the allocated hwpt to device. It's kernel to deduce where to install the
+hwpt based on the underlying iommu hardware.
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+1	0	drivers/vfio/pci/vfio_pci.c
+119	14	drivers/vfio/pci/vfio_pci_core.c
+27	0	drivers/vfio/vfio.c
+2	0	include/linux/vfio.h
+10	1	include/linux/vfio_pci_core.h
+25	0	include/uapi/linux/vfio.h
+
+diff --git a/drivers/vfio/pci/vfio_pci.c b/drivers/vfio/pci/vfio_pci.c
+index 4ec675017e88..dbb6a4bb3d40 100644
+--- a/drivers/vfio/pci/vfio_pci.c
++++ b/drivers/vfio/pci/vfio_pci.c
+@@ -133,6 +133,7 @@ static const struct vfio_device_ops vfio_pci_ops = {
+ 	.open_device	= vfio_pci_open_device,
+ 	.close_device	= vfio_pci_core_close_device,
+ 	.attach_ioas	= vfio_pci_core_attach_ioas,
++	.attach_hwpt	= vfio_pci_core_attach_hwpt,
+ 	.detach_hwpt	= vfio_pci_core_detach_hwpt,
+ 	.ioctl		= vfio_pci_core_ioctl,
+ 	.device_feature = vfio_pci_core_ioctl_feature,
+diff --git a/drivers/vfio/pci/vfio_pci_core.c b/drivers/vfio/pci/vfio_pci_core.c
+index c578a5a41efa..5cb04c4a56a5 100644
+--- a/drivers/vfio/pci/vfio_pci_core.c
++++ b/drivers/vfio/pci/vfio_pci_core.c
+@@ -662,7 +662,7 @@ int vfio_pci_core_bind_iommufd(struct vfio_device *core_vdev,
+ 
+ 	vdev->iommufd = bind->iommufd;
+ 	vdev->idev = idev;
+-	vdev->hwpt_id = IOMMUFD_INVALID_ID;
++	INIT_LIST_HEAD(&vdev->hwpts);
+ 	bind->out_devid = id;
+ 
+ out_unlock:
+@@ -678,10 +678,13 @@ void vfio_pci_core_unbind_iommufd(struct vfio_device *core_vdev)
+ 
+ 	mutex_lock(&vdev->idev_lock);
+ 	if (vdev->idev) {
+-		if (vdev->hwpt_id != IOMMUFD_INVALID_ID) {
+-			iommufd_device_detach(vdev->idev, vdev->hwpt_id);
+-			vdev->iommufd = -1;
+-			vdev->hwpt_id = IOMMUFD_INVALID_ID;
++		struct vfio_pci_hwpt *hwpt, *tmp;
++
++		vdev->iommufd = -1;
++		list_for_each_entry_safe(hwpt, tmp, &vdev->hwpts, next) {
++			list_del(&hwpt->next);
++			iommufd_device_detach(vdev->idev, hwpt->hwpt_id);
++			kfree(hwpt);
+ 		}
+ 		iommufd_unbind_device(vdev->idev);
+ 		vdev->idev = NULL;
+@@ -690,11 +693,25 @@ void vfio_pci_core_unbind_iommufd(struct vfio_device *core_vdev)
+ }
+ EXPORT_SYMBOL_GPL(vfio_pci_core_unbind_iommufd);
+ 
++static struct vfio_pci_hwpt *
++vfio_pci_find_hwpt(struct vfio_pci_core_device *vdev, u32 hwpt_id)
++{
++	struct vfio_pci_hwpt *hwpt;
++
++	list_for_each_entry(hwpt, &vdev->hwpts, next) {
++		if (hwpt->hwpt_id == hwpt_id) {
++			return hwpt;
++		}
++	}
++	return NULL;
++}
++
+ int vfio_pci_core_attach_ioas(struct vfio_device *core_vdev,
+ 			      struct vfio_device_attach_ioas *attach)
+ {
+ 	struct vfio_pci_core_device *vdev =
+ 		container_of(core_vdev, struct vfio_pci_core_device, vdev);
++	struct vfio_pci_hwpt *hwpt;
+ 	u32 pt_id = attach->ioas_id;
+ 	int ret;
+ 
+@@ -705,12 +722,24 @@ int vfio_pci_core_attach_ioas(struct vfio_device *core_vdev,
+ 		goto out_unlock;
+ 	}
+ 
+-	/* Currently only allows one IOAS attach */
+-	if (vdev->hwpt_id != IOMMUFD_INVALID_ID) {
++	/* Only allows one stage2 attach */
++	if (!list_empty(&vdev->hwpts)) {
++		ret = -EBUSY;
++		goto out_unlock;
++	}
++
++	hwpt = vfio_pci_find_hwpt(vdev, pt_id);
++	if (hwpt) {
+ 		ret = -EBUSY;
+ 		goto out_unlock;
+ 	}
+ 
++	hwpt = kzalloc(sizeof(*hwpt), GFP_KERNEL);
++	if (!hwpt) {
++		ret = -ENOMEM;
++		goto out_unlock;
++	}
++
+ 	/*
+ 	 * FIXME: needs to discuss the allow_unsage_interrupt. May want
+ 	 * to have this parameter in vfio scope.
+@@ -718,11 +747,21 @@ int vfio_pci_core_attach_ioas(struct vfio_device *core_vdev,
+ 	ret = iommufd_device_attach(vdev->idev, &pt_id,
+ 				    IOMMUFD_ATTACH_FLAGS_ALLOW_UNSAFE_INTERRUPT);
+ 	if (ret)
+-		goto out_unlock;
++		goto out_free;
++
++	WARN_ON(attach->ioas_id == pt_id);
++
++	hwpt->hwpt_id = pt_id;
++
++	list_add(&hwpt->next, &vdev->hwpts);
++
++	mutex_unlock(&vdev->idev_lock);
+ 
+-	vdev->hwpt_id = pt_id;
+ 	attach->out_hwpt_id = pt_id;
+ 
++	return 0;
++out_free:
++	kfree(hwpt);
+ out_unlock:
+ 	mutex_unlock(&vdev->idev_lock);
+ 
+@@ -730,21 +769,87 @@ int vfio_pci_core_attach_ioas(struct vfio_device *core_vdev,
+ }
+ EXPORT_SYMBOL_GPL(vfio_pci_core_attach_ioas);
+ 
++int vfio_pci_core_attach_hwpt(struct vfio_device *core_vdev,
++			      struct vfio_device_attach_hwpt *attach)
++{
++	struct vfio_pci_core_device *vdev =
++		container_of(core_vdev, struct vfio_pci_core_device, vdev);
++	struct vfio_pci_hwpt *hwpt;
++	u32 pt_id = attach->hwpt_id;
++	int ret;
++
++	mutex_lock(&vdev->idev_lock);
++
++	if (!vdev->idev || vdev->iommufd != attach->iommufd) {
++		ret = -EINVAL;
++		goto out_unlock;
++	}
++
++	/*
++	 * For user managed hwpt, requires device already been attached
++	 * to a stage2 hwpt. Otherwise, needs to fail the attempt of hwpt
++	 * attachment.
++	 */
++	if (list_empty(&vdev->hwpts)) {
++		ret = -EOPNOTSUPP;
++		goto out_unlock;
++	}
++
++	hwpt = vfio_pci_find_hwpt(vdev, pt_id);
++	if (hwpt) {
++		ret = -EBUSY;
++		goto out_unlock;
++	}
++
++	hwpt = kzalloc(sizeof(*hwpt), GFP_KERNEL);
++	if (!hwpt) {
++		ret = -ENOMEM;
++		goto out_unlock;
++	}
++
++	ret = iommufd_device_attach(vdev->idev, &pt_id, 0);
++	if (ret)
++		goto out_free;
++
++
++	hwpt->hwpt_id = pt_id;
++	hwpt->stage1 = true;
++	list_add(&hwpt->next, &vdev->hwpts);
++
++	mutex_unlock(&vdev->idev_lock);
++	return 0;
++out_free:
++	kfree(hwpt);
++out_unlock:
++	mutex_unlock(&vdev->idev_lock);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(vfio_pci_core_attach_hwpt);
++
+ void vfio_pci_core_detach_hwpt(struct vfio_device *core_vdev,
+ 			       struct vfio_device_detach_hwpt *detach)
+ {
+ 	struct vfio_pci_core_device *vdev =
+ 		container_of(core_vdev, struct vfio_pci_core_device, vdev);
++	struct vfio_pci_hwpt *hwpt;
+ 
+ 	mutex_lock(&vdev->idev_lock);
+ 
+-	if (!vdev->idev ||
+-	    vdev->iommufd != detach->iommufd ||
+-	    vdev->hwpt_id != detach->hwpt_id)
++	if (!vdev->idev || vdev->iommufd != detach->iommufd)
++		goto out_unlock;
++
++	hwpt = vfio_pci_find_hwpt(vdev, detach->hwpt_id);
++	if (!hwpt)
++		goto out_unlock;
++
++	/* stage2 deatch is not allowed until the hwpts is singular */
++	if (!hwpt->stage1 && !list_is_singular(&vdev->hwpts))
+ 		goto out_unlock;
+ 
+-	iommufd_device_detach(vdev->idev, vdev->hwpt_id);
+-	vdev->hwpt_id = IOMMUFD_INVALID_ID;
++	list_del(&hwpt->next);
++	iommufd_device_detach(vdev->idev, hwpt->hwpt_id);
++	kfree(hwpt);
+ 
+ out_unlock:
+ 	mutex_unlock(&vdev->idev_lock);
+diff --git a/drivers/vfio/vfio.c b/drivers/vfio/vfio.c
+index 7525be9e6f5e..bf716166f7c1 100644
+--- a/drivers/vfio/vfio.c
++++ b/drivers/vfio/vfio.c
+@@ -1882,6 +1882,31 @@ static long vfio_device_attach_ioas(struct vfio_device *device,
+ 			    sizeof(attach.out_hwpt_id)) ? -EFAULT : 0;
+ }
+ 
++static long vfio_device_attach_hwpt(struct vfio_device *device,
++				    unsigned long arg)
++{
++	struct vfio_device_attach_hwpt attach;
++	unsigned long minsz;
++
++	minsz = offsetofend(struct vfio_device_attach_hwpt, hwpt_id);
++	if (copy_from_user(&attach, (void __user *)arg, minsz))
++		return -EFAULT;
++
++	if (attach.argsz < minsz || attach.flags ||
++	    attach.iommufd < 0 || attach.hwpt_id == IOMMUFD_INVALID_ID)
++		return -EINVAL;
++
++	/* not allowed if the device is opened in legacy interface */
++	if (vfio_device_in_container(device))
++		return -EBUSY;
++
++	if (unlikely(!device->ops->attach_hwpt))
++		return -EINVAL;
++
++	return device->ops->attach_hwpt(device, &attach);
++
++}
++
+ static long vfio_device_detach_hwpt(struct vfio_device *device,
+ 				    unsigned long arg)
+ {
+@@ -1926,6 +1951,8 @@ static long vfio_device_fops_unl_ioctl(struct file *filep,
+ 	switch (cmd) {
+ 	case VFIO_DEVICE_ATTACH_IOAS:
+ 		return vfio_device_attach_ioas(device, arg);
++	case VFIO_DEVICE_ATTACH_HWPT:
++		return vfio_device_attach_hwpt(device, arg);
+ 	case VFIO_DEVICE_DETACH_HWPT:
+ 		return vfio_device_detach_hwpt(device, arg);
+ 	case VFIO_DEVICE_FEATURE:
+diff --git a/include/linux/vfio.h b/include/linux/vfio.h
+index e202d0ea06e2..2767f0c64f7e 100644
+--- a/include/linux/vfio.h
++++ b/include/linux/vfio.h
+@@ -80,6 +80,8 @@ struct vfio_device_ops {
+ 	void	(*unbind_iommufd)(struct vfio_device *vdev);
+ 	int	(*attach_ioas)(struct vfio_device *vdev,
+ 			       struct vfio_device_attach_ioas *attach);
++	int	(*attach_hwpt)(struct vfio_device *vdev,
++			       struct vfio_device_attach_hwpt *attach);
+ 	void	(*detach_hwpt)(struct vfio_device *vdev,
+ 			       struct vfio_device_detach_hwpt *detach);
+ 	int	(*open_device)(struct vfio_device *vdev);
+diff --git a/include/linux/vfio_pci_core.h b/include/linux/vfio_pci_core.h
+index ec4d1be393c7..65167aecb7f0 100644
+--- a/include/linux/vfio_pci_core.h
++++ b/include/linux/vfio_pci_core.h
+@@ -96,6 +96,13 @@ struct vfio_pci_mmap_vma {
+ 	struct list_head	vma_next;
+ };
+ 
++struct vfio_pci_hwpt {
++	/* Head at vfio_pci_core_device::hwpts */
++	struct list_head	next;
++	u32			hwpt_id;
++	bool			stage1;
++};
++
+ struct vfio_pci_core_device {
+ 	struct vfio_device	vdev;
+ 	struct pci_dev		*pdev;
+@@ -143,7 +150,7 @@ struct vfio_pci_core_device {
+ 	struct mutex		idev_lock;
+ 	struct iommufd_device	*idev;
+ 	int			iommufd;
+-	u32			hwpt_id;
++	struct list_head	hwpts;
+ };
+ 
+ #define is_intx(vdev) (vdev->irq_type == VFIO_PCI_INTX_IRQ_INDEX)
+@@ -231,6 +238,8 @@ int vfio_pci_core_bind_iommufd(struct vfio_device *core_vdev,
+ void vfio_pci_core_unbind_iommufd(struct vfio_device *core_vdev);
+ int vfio_pci_core_attach_ioas(struct vfio_device *core_vdev,
+ 			      struct vfio_device_attach_ioas *attach);
++int vfio_pci_core_attach_hwpt(struct vfio_device *core_vdev,
++			      struct vfio_device_attach_hwpt *attach);
+ void vfio_pci_core_detach_hwpt(struct vfio_device *core_vdev,
+ 			       struct vfio_device_detach_hwpt *detach);
+ void vfio_pci_core_close_device(struct vfio_device *core_vdev);
+diff --git a/include/uapi/linux/vfio.h b/include/uapi/linux/vfio.h
+index 474144d64c83..5e6e7249c775 100644
+--- a/include/uapi/linux/vfio.h
++++ b/include/uapi/linux/vfio.h
+@@ -275,6 +275,31 @@ struct vfio_device_detach_hwpt {
+ 
+ #define VFIO_DEVICE_DETACH_HWPT	_IO(VFIO_TYPE, VFIO_BASE + 21)
+ 
++/*
++ * VFIO_DEVICE_ATTACH_HWPT - _IOW(VFIO_TYPE, VFIO_BASE + 22,
++ *				  struct vfio_device_attach_hwpt)
++ *
++ * Attach a vfio device to the specified hardware page table.
++ *
++ * The hwpt should be a user managed page table allocated via iommufd.
++ * Undo by VFIO_DEVICE_DETACH_HWPT.
++ *
++ * @argsz:	user filled size of this data.
++ * @flags:	must be 0.
++ * @iommufd:	iommufd where the hwpt comes from.
++ * @hwpt_id:	Input the target hwpt.
++ *
++ * Return: 0 on success, -errno on failure.
++ */
++struct vfio_device_attach_hwpt {
++	__u32	argsz;
++	__u32	flags;
++	__s32	iommufd;
++	__u32	hwpt_id;
++};
++
++#define VFIO_DEVICE_ATTACH_HWPT	_IO(VFIO_TYPE, VFIO_BASE + 22)
++
+ /**
+  * VFIO_DEVICE_GET_INFO - _IOR(VFIO_TYPE, VFIO_BASE + 7,
+  *						struct vfio_device_info)
+-- 
+2.34.1
+

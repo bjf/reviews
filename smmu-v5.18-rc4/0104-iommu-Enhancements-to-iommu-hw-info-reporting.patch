@@ -1,0 +1,48 @@
+From 7e728c77f0a6b6aab3433075447afa5c7d54996b Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Sat, 11 Jun 2022 21:29:11 -0700
+Subject: [PATCH 104/141] iommu: Enhancements to iommu hw info reporting
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+4	3	drivers/iommu/intel/iommu.c
+3	2	include/linux/iommu.h
+
+diff --git a/drivers/iommu/intel/iommu.c b/drivers/iommu/intel/iommu.c
+index be77dcf9e7c4..f9b030bd7185 100644
+--- a/drivers/iommu/intel/iommu.c
++++ b/drivers/iommu/intel/iommu.c
+@@ -5053,9 +5053,10 @@ static int intel_iommu_hw_info(struct device *dev, struct iommu_hw_info *info)
+ 		return -ENODEV;
+ 
+ 	info->type = IOMMU_DRIVER_INTEL_V1;
+-	info->vtd_data.flags = 0;
+-	info->vtd_data.cap_reg = iommu->cap;
+-	info->vtd_data.ecap_reg = iommu->ecap;
++	info->data_length = sizeof(struct iommu_vtd_data);
++	info->data.vtd.flags = 0;
++	info->data.vtd.cap_reg = iommu->cap;
++	info->data.vtd.ecap_reg = iommu->ecap;
+ 
+ 	return 0;
+ }
+diff --git a/include/linux/iommu.h b/include/linux/iommu.h
+index a29026fb3124..fdd03dabdca9 100644
+--- a/include/linux/iommu.h
++++ b/include/linux/iommu.h
+@@ -400,9 +400,10 @@ struct dev_iommu {
+ 
+ struct iommu_hw_info {
+ 	enum iommu_hw_type type;
++	unsigned int data_length;
+ 	union {
+-		struct iommu_vtd_data vtd_data;
+-	};
++		struct iommu_vtd_data vtd;
++	} data;
+ };
+ 
+ int iommu_get_hw_info(struct device *dev, struct iommu_hw_info *info);
+-- 
+2.34.1
+

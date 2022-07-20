@@ -1,0 +1,111 @@
+From b574339b5d2650ee40547547a09925338f27e1ee Mon Sep 17 00:00:00 2001
+From: Nicolin Chen <nicolinc@nvidia.com>
+Date: Wed, 6 Jul 2022 20:29:18 -0700
+Subject: [PATCH 126/141] iommu: Add iommu_get_msi_domain helper
+
+The new IOMMUFD designs nesting setup using two iommu_domain pointers,
+corresponding to stage S1 and stage S2, and the S1 iommu_domain has a
+type of IOMMU_DOMAIN_NESTING, is a virtual object that represents the
+iommu_domain in the guest, which it attaches the device onto. And the
+S2 domain is owned by a hypervisor, handling stage-2 IO page table.
+
+So the msi_cookie is actually setup in the s2 iommu_domain. This means
+iommu_get_domain_for_dev() no longer works in iommu_dma_get_msi_page()
+and iommu_dma_compose_msi_msg(), because that returns s1 iommu_domain.
+
+Note that not all drivers would need this msi_domain. So adding it to
+iommu_group would waste memory. Add a helper function for a driver to
+return a correct iommu_domain.
+
+Change-Id: Ia132d9cb179433f5b6f3d1e46b78404a3774af3c
+Signed-off-by: Nicolin Chen <nicolinc@nvidia.com>
+
+2	2	drivers/iommu/dma-iommu.c
+16	0	drivers/iommu/iommu.c
+8	0	include/linux/iommu.h
+
+diff --git a/drivers/iommu/dma-iommu.c b/drivers/iommu/dma-iommu.c
+index 1d6163810cb7..9f6d4cf39995 100644
+--- a/drivers/iommu/dma-iommu.c
++++ b/drivers/iommu/dma-iommu.c
+@@ -1538,7 +1538,7 @@ static struct iommu_dma_msi_page *iommu_dma_get_msi_page(struct device *dev,
+ int iommu_dma_prepare_msi(struct msi_desc *desc, phys_addr_t msi_addr)
+ {
+ 	struct device *dev = msi_desc_to_dev(desc);
+-	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
++	struct iommu_domain *domain = iommu_get_msi_domain(dev);
+ 	struct iommu_dma_msi_page *msi_page;
+ 	static DEFINE_MUTEX(msi_prepare_lock); /* see below */
+ 
+@@ -1567,7 +1567,7 @@ void iommu_dma_compose_msi_msg(struct msi_desc *desc,
+ 			       struct msi_msg *msg)
+ {
+ 	struct device *dev = msi_desc_to_dev(desc);
+-	const struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
++	const struct iommu_domain *domain = iommu_get_msi_domain(dev);
+ 	const struct iommu_dma_msi_page *msi_page;
+ 
+ 	msi_page = msi_desc_get_iommu_cookie(desc);
+diff --git a/drivers/iommu/iommu.c b/drivers/iommu/iommu.c
+index cf23c1a02715..9b03562057e7 100644
+--- a/drivers/iommu/iommu.c
++++ b/drivers/iommu/iommu.c
+@@ -2043,6 +2043,22 @@ struct iommu_domain *iommu_get_dma_domain(struct device *dev)
+ 	return dev->iommu_group->default_domain;
+ }
+ 
++struct iommu_domain *iommu_get_msi_domain(struct device *dev)
++{
++	const struct iommu_ops *ops;
++
++	if (!dev->iommu || !dev->iommu->iommu_dev)
++		goto attached_domain;
++
++	ops = dev_iommu_ops(dev);
++	if (ops->get_msi_domain)
++		return ops->get_msi_domain(dev);
++
++attached_domain:
++	return iommu_get_domain_for_dev(dev);
++}
++EXPORT_SYMBOL_GPL(iommu_get_msi_domain);
++
+ /*
+  * IOMMU groups are really the natural working unit of the IOMMU, but
+  * the IOMMU API works on domains and devices.  Bridge that gap by
+diff --git a/include/linux/iommu.h b/include/linux/iommu.h
+index 0c687cbb2efb..f43dc3441234 100644
+--- a/include/linux/iommu.h
++++ b/include/linux/iommu.h
+@@ -253,6 +253,8 @@ struct iommu_ops {
+ 						    unsigned long s1_ptr,
+ 						    union iommu_stage1_config *cfg);
+ 
++	struct iommu_domain *(*get_msi_domain)(struct device *dev);
++
+ 	struct iommu_device *(*probe_device)(struct device *dev);
+ 	void (*release_device)(struct device *dev);
+ 	void (*probe_finalize)(struct device *dev);
+@@ -471,6 +473,7 @@ extern int iommu_sva_unbind_gpasid(struct iommu_domain *domain,
+ 				   struct device *dev, ioasid_t pasid);
+ extern struct iommu_domain *iommu_get_domain_for_dev(struct device *dev);
+ extern struct iommu_domain *iommu_get_dma_domain(struct device *dev);
++extern struct iommu_domain *iommu_get_msi_domain(struct device *dev);
+ extern int iommu_map(struct iommu_domain *domain, unsigned long iova,
+ 		     phys_addr_t paddr, size_t size, int prot);
+ extern int iommu_map_atomic(struct iommu_domain *domain, unsigned long iova,
+@@ -786,6 +789,11 @@ static inline struct iommu_domain *iommu_get_domain_for_dev(struct device *dev)
+ 	return NULL;
+ }
+ 
++static inline struct iommu_domain *iommu_get_msi_domain(struct device *dev)
++{
++	return NULL;
++}
++
+ static inline int iommu_map(struct iommu_domain *domain, unsigned long iova,
+ 			    phys_addr_t paddr, size_t size, int prot)
+ {
+-- 
+2.34.1
+

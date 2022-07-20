@@ -1,0 +1,351 @@
+From 551e461cca02a3a8b599dd8bafde40d416e5f859 Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Fri, 10 Dec 2021 13:22:00 +0800
+Subject: [PATCH 078/141] vfio/pci: Add VFIO_DEVICE_ATTACH_IOAS
+
+This patch supports the ioas_pagetable attachment for vfio pci devices.
+
+An open:
+Since the code are mostly common (non-pci specific), should we add the
+code in vfio core instead of vfio pci? Wish to have good idea before
+pushing to upstream.
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+2	0	drivers/vfio/pci/vfio_pci.c
+71	0	drivers/vfio/pci/vfio_pci_core.c
+68	1	drivers/vfio/vfio.c
+2	0	include/linux/iommufd.h
+4	0	include/linux/vfio.h
+6	0	include/linux/vfio_pci_core.h
+49	0	include/uapi/linux/vfio.h
+
+diff --git a/drivers/vfio/pci/vfio_pci.c b/drivers/vfio/pci/vfio_pci.c
+index b26b98aac16f..d12821987a1b 100644
+--- a/drivers/vfio/pci/vfio_pci.c
++++ b/drivers/vfio/pci/vfio_pci.c
+@@ -132,6 +132,8 @@ static const struct vfio_device_ops vfio_pci_ops = {
+ 	.unbind_iommufd	= vfio_pci_core_unbind_iommufd,
+ 	.open_device	= vfio_pci_open_device,
+ 	.close_device	= vfio_pci_core_close_device,
++	.attach_ioas	= vfio_pci_core_attach_ioas,
++	.detach_ioas	= vfio_pci_core_detach_ioas,
+ 	.ioctl		= vfio_pci_core_ioctl,
+ 	.device_feature = vfio_pci_core_ioctl_feature,
+ 	.read		= vfio_pci_core_read,
+diff --git a/drivers/vfio/pci/vfio_pci_core.c b/drivers/vfio/pci/vfio_pci_core.c
+index 7f124eaa65b4..8237cd6cd4ee 100644
+--- a/drivers/vfio/pci/vfio_pci_core.c
++++ b/drivers/vfio/pci/vfio_pci_core.c
+@@ -661,6 +661,7 @@ int vfio_pci_core_bind_iommufd(struct vfio_device *core_vdev,
+ 	}
+ 
+ 	vdev->idev = idev;
++	vdev->ioas_id = IOMMUFD_INVALID_ID;
+ 	bind->out_devid = id;
+ 
+ out_unlock:
+@@ -676,6 +677,11 @@ void vfio_pci_core_unbind_iommufd(struct vfio_device *core_vdev)
+ 
+ 	mutex_lock(&vdev->idev_lock);
+ 	if (vdev->idev) {
++		if (vdev->ioas_id != IOMMUFD_INVALID_ID) {
++			vdev->iommufd = -1;
++			vdev->ioas_id = IOMMUFD_INVALID_ID;
++			iommufd_device_detach(vdev->idev);
++		}
+ 		iommufd_unbind_device(vdev->idev);
+ 		vdev->idev = NULL;
+ 	}
+@@ -683,6 +689,71 @@ void vfio_pci_core_unbind_iommufd(struct vfio_device *core_vdev)
+ }
+ EXPORT_SYMBOL_GPL(vfio_pci_core_unbind_iommufd);
+ 
++int vfio_pci_core_attach_ioas(struct vfio_device *core_vdev,
++			      struct vfio_device_attach_ioas *attach)
++{
++	struct vfio_pci_core_device *vdev =
++		container_of(core_vdev, struct vfio_pci_core_device, vdev);
++	u32 pt_id = attach->ioas_id;
++	int ret;
++
++	mutex_lock(&vdev->idev_lock);
++
++	if (!vdev->idev) {
++		ret = -EINVAL;
++		goto out_unlock;
++	}
++
++	/* Currently only allows one IOAS attach */
++	if (vdev->ioas_id != IOMMUFD_INVALID_ID) {
++		ret = -EBUSY;
++		goto out_unlock;
++	}
++
++	/*
++	 * FIXME: needs to discuss the allow_unsage_interrupt. May want
++	 * to have this parameter in vfio scope.
++	 */
++	ret = iommufd_device_attach(vdev->idev, &pt_id,
++				    IOMMUFD_ATTACH_FLAGS_ALLOW_UNSAFE_INTERRUPT);
++	if (ret)
++		goto out_unlock;
++
++	vdev->iommufd = attach->iommufd;
++	vdev->ioas_id = attach->ioas_id;
++	attach->out_hwpt_id = pt_id;
++
++out_unlock:
++	mutex_unlock(&vdev->idev_lock);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(vfio_pci_core_attach_ioas);
++
++void vfio_pci_core_detach_ioas(struct vfio_device *core_vdev,
++			       struct vfio_device_detach_ioas *detach)
++{
++	struct vfio_pci_core_device *vdev =
++		container_of(core_vdev, struct vfio_pci_core_device, vdev);
++
++	mutex_lock(&vdev->idev_lock);
++
++	if (vdev->ioas_id == IOMMUFD_INVALID_ID)
++		goto out_unlock;
++
++	if (vdev->iommufd != detach->iommufd ||
++	    vdev->ioas_id != detach->ioas_id)
++		goto out_unlock;
++
++	vdev->iommufd = -1;
++	vdev->ioas_id = IOMMUFD_INVALID_ID;
++	iommufd_device_detach(vdev->idev);
++
++out_unlock:
++	mutex_unlock(&vdev->idev_lock);
++}
++EXPORT_SYMBOL_GPL(vfio_pci_core_detach_ioas);
++
+ long vfio_pci_core_ioctl(struct vfio_device *core_vdev, unsigned int cmd,
+ 		unsigned long arg)
+ {
+diff --git a/drivers/vfio/vfio.c b/drivers/vfio/vfio.c
+index bae1c8b4974c..6ade5f062167 100644
+--- a/drivers/vfio/vfio.c
++++ b/drivers/vfio/vfio.c
+@@ -32,6 +32,7 @@
+ #include <linux/vfio.h>
+ #include <linux/wait.h>
+ #include <linux/sched/signal.h>
++#include <linux/iommufd.h>
+ #include "vfio.h"
+ 
+ #define DRIVER_VERSION	"0.3"
+@@ -1240,11 +1241,16 @@ static int vfio_device_open_count(struct vfio_device *device)
+ 	return ret;
+ }
+ 
++static bool vfio_device_in_container(struct vfio_device *device)
++{
++	return device->group && device->group->container;
++}
++
+ static void vfio_device_close_decount(struct vfio_device *device)
+ {
+ 	mutex_lock(&device->dev_set->lock);
+ 	if (device->open_count == 1) {
+-		if ((!device->group || !device->group->container) &&
++		if (!vfio_device_in_container(device) &&
+ 		    device->ops->unbind_iommufd)
+ 			device->ops->unbind_iommufd(device);
+ 		if (device->ops->close_device)
+@@ -1817,6 +1823,63 @@ static long vfio_device_bind_iommufd(struct file *filep, unsigned long arg)
+ 			    sizeof(bind.out_devid)) ? -EFAULT : 0;
+ }
+ 
++static long vfio_device_attach_ioas(struct vfio_device *device,
++				    unsigned long arg)
++{
++	struct vfio_device_attach_ioas attach;
++	unsigned long minsz;
++	int ret;
++
++	minsz = offsetofend(struct vfio_device_attach_ioas, ioas_id);
++	if (copy_from_user(&attach, (void __user *)arg, minsz))
++		return -EFAULT;
++
++	if (attach.argsz < minsz || attach.flags ||
++	    attach.iommufd < 0 || attach.ioas_id == IOMMUFD_INVALID_ID)
++		return -EINVAL;
++
++	/* not allowed if the device is opened in legacy interface */
++	if (vfio_device_in_container(device))
++		return -EBUSY;
++
++	if (unlikely(!device->ops->attach_ioas))
++		return -EINVAL;
++
++	ret = device->ops->attach_ioas(device, &attach);
++	if (ret)
++		return ret;
++
++	return copy_to_user((void __user *)arg + minsz,
++			    &attach.out_hwpt_id,
++			    sizeof(attach.out_hwpt_id)) ? -EFAULT : 0;
++}
++
++static long vfio_device_detach_ioas(struct vfio_device *device,
++				    unsigned long arg)
++{
++	struct vfio_device_detach_ioas detach;
++	unsigned long minsz;
++
++	minsz = offsetofend(struct vfio_device_detach_ioas, ioas_id);
++	if (copy_from_user(&detach, (void __user *)arg, minsz))
++		return -EFAULT;
++
++	if (detach.argsz < minsz || detach.flags ||
++	    detach.iommufd < 0 || detach.ioas_id == IOMMUFD_INVALID_ID)
++		return -EINVAL;
++
++	/* not allowed if the device is opened in legacy interface */
++	if (vfio_device_in_container(device))
++		return -EBUSY;
++
++	if (unlikely(!device->ops->detach_ioas))
++		return -EINVAL;
++
++	device->ops->detach_ioas(device, &detach);
++
++	return 0;
++}
++
+ static long vfio_device_fops_unl_ioctl(struct file *filep,
+ 				       unsigned int cmd, unsigned long arg)
+ {
+@@ -1833,6 +1896,10 @@ static long vfio_device_fops_unl_ioctl(struct file *filep,
+ 		return -EINVAL;
+ 
+ 	switch (cmd) {
++	case VFIO_DEVICE_ATTACH_IOAS:
++		return vfio_device_attach_ioas(device, arg);
++	case VFIO_DEVICE_DETACH_IOAS:
++		return vfio_device_detach_ioas(device, arg);
+ 	case VFIO_DEVICE_FEATURE:
+ 		return vfio_ioctl_device_feature(device, (void __user *)arg);
+ 	default:
+diff --git a/include/linux/iommufd.h b/include/linux/iommufd.h
+index 6caac05475e3..c25b156de179 100644
+--- a/include/linux/iommufd.h
++++ b/include/linux/iommufd.h
+@@ -11,6 +11,8 @@
+ #include <linux/err.h>
+ #include <linux/device.h>
+ 
++#define IOMMUFD_INVALID_ID  0
++
+ struct pci_dev;
+ struct iommufd_device;
+ 
+diff --git a/include/linux/vfio.h b/include/linux/vfio.h
+index e41738d1f625..4d38d0be0280 100644
+--- a/include/linux/vfio.h
++++ b/include/linux/vfio.h
+@@ -78,6 +78,10 @@ struct vfio_device_ops {
+ 	int	(*bind_iommufd)(struct vfio_device *vdev,
+ 				struct vfio_device_bind_iommufd *bind);
+ 	void	(*unbind_iommufd)(struct vfio_device *vdev);
++	int	(*attach_ioas)(struct vfio_device *vdev,
++			       struct vfio_device_attach_ioas *attach);
++	void	(*detach_ioas)(struct vfio_device *vdev,
++			       struct vfio_device_detach_ioas *detach);
+ 	int	(*open_device)(struct vfio_device *vdev);
+ 	void	(*close_device)(struct vfio_device *vdev);
+ 	void	(*release)(struct vfio_device *vdev);
+diff --git a/include/linux/vfio_pci_core.h b/include/linux/vfio_pci_core.h
+index e35c4519cb1d..480907544f4c 100644
+--- a/include/linux/vfio_pci_core.h
++++ b/include/linux/vfio_pci_core.h
+@@ -142,6 +142,8 @@ struct vfio_pci_core_device {
+ 	struct rw_semaphore	memory_lock;
+ 	struct mutex		idev_lock;
+ 	struct iommufd_device	*idev;
++	int			iommufd;
++	u32			ioas_id;
+ };
+ 
+ #define is_intx(vdev) (vdev->irq_type == VFIO_PCI_INTX_IRQ_INDEX)
+@@ -227,6 +229,10 @@ void vfio_pci_core_release(struct vfio_device *core_dev);
+ int vfio_pci_core_bind_iommufd(struct vfio_device *core_vdev,
+ 			       struct vfio_device_bind_iommufd *bind);
+ void vfio_pci_core_unbind_iommufd(struct vfio_device *core_vdev);
++int vfio_pci_core_attach_ioas(struct vfio_device *core_vdev,
++			      struct vfio_device_attach_ioas *attach);
++void vfio_pci_core_detach_ioas(struct vfio_device *core_vdev,
++			       struct vfio_device_detach_ioas *detach);
+ void vfio_pci_core_close_device(struct vfio_device *core_vdev);
+ struct vfio_pci_core_device *
+ vfio_pci_core_alloc_device(struct pci_dev *pdev,
+diff --git a/include/uapi/linux/vfio.h b/include/uapi/linux/vfio.h
+index 5587a18660f1..972528bcdca6 100644
+--- a/include/uapi/linux/vfio.h
++++ b/include/uapi/linux/vfio.h
+@@ -225,6 +225,55 @@ struct vfio_device_bind_iommufd {
+ 
+ #define VFIO_DEVICE_BIND_IOMMUFD	_IO(VFIO_TYPE, VFIO_BASE + 19)
+ 
++/*
++ * VFIO_DEVICE_ATTACH_IOAS - _IOW(VFIO_TYPE, VFIO_BASE + 21,
++ *				  struct vfio_device_attach_ioas)
++ *
++ * Attach a vfio device to the specified IOAS.
++ *
++ * Multiple vfio devices can be attached to the same IOAS Page Table. One
++ * device can be attached to only one ioas at this point.
++ *
++ * @argsz:	user filled size of this data.
++ * @flags:	reserved for future extension.
++ * @iommufd:	iommufd where the ioas comes from.
++ * @ioas_id:	Input the target I/O address space page table.
++ * @hwpt_id:	Output the hw page table id
++ *
++ * Return: 0 on success, -errno on failure.
++ */
++struct vfio_device_attach_ioas {
++	__u32	argsz;
++	__u32	flags;
++	__s32	iommufd;
++	__u32	ioas_id;
++	__u32	out_hwpt_id;
++};
++
++#define VFIO_DEVICE_ATTACH_IOAS	_IO(VFIO_TYPE, VFIO_BASE + 20)
++
++/*
++ * VFIO_DEVICE_DETACH_IOAS - _IOW(VFIO_TYPE, VFIO_BASE + 21,
++ *				  struct vfio_device_detach_ioas)
++ *
++ * Detach a vfio device from the specified IOAS.
++ *
++ * @argsz:	user filled size of this data.
++ * @flags:	reserved for future extension.
++ * @iommufd:	iommufd where the ioas comes from.
++ * @ioas_id:	Input the target I/O address space page table.
++ *
++ * Return: 0 on success, -errno on failure.
++ */
++struct vfio_device_detach_ioas {
++	__u32	argsz;
++	__u32	flags;
++	__s32	iommufd;
++	__u32	ioas_id;
++};
++
++#define VFIO_DEVICE_DETACH_IOAS	_IO(VFIO_TYPE, VFIO_BASE + 21)
++
+ /**
+  * VFIO_DEVICE_GET_INFO - _IOR(VFIO_TYPE, VFIO_BASE + 7,
+  *						struct vfio_device_info)
+-- 
+2.34.1
+

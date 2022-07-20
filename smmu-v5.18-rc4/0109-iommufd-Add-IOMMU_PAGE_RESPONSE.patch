@@ -1,0 +1,93 @@
+From 09b2c01d841ce91ba98fac1eae9921d73b9e5961 Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Thu, 26 May 2022 06:19:33 -0700
+Subject: [PATCH 109/141] iommufd: Add IOMMU_PAGE_RESPONSE
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+38	0	drivers/iommu/iommufd/hw_pagetable.c
+1	0	drivers/iommu/iommufd/iommufd_private.h
+3	0	drivers/iommu/iommufd/main.c
+
+diff --git a/drivers/iommu/iommufd/hw_pagetable.c b/drivers/iommu/iommufd/hw_pagetable.c
+index 2525bbc51d0c..56e037fb24f8 100644
+--- a/drivers/iommu/iommufd/hw_pagetable.c
++++ b/drivers/iommu/iommufd/hw_pagetable.c
+@@ -534,3 +534,41 @@ int iommufd_hwpt_invalidate_cache(struct iommufd_ucmd *ucmd)
+ 	iommufd_put_object(obj);
+ 	return rc;
+ }
++
++int iommufd_hwpt_page_response(struct iommufd_ucmd *ucmd)
++{
++	struct iommu_hwpt_page_response *cmd = ucmd->cmd;
++	struct iommufd_object *obj, *dev_obj;
++	struct iommufd_hw_pagetable *hwpt;
++	struct iommufd_device *idev;
++	int rc = 0;
++
++	if (cmd->flags)
++		return -EOPNOTSUPP;
++
++	/* TODO: more sanity check when the struct is finalized */
++	obj = iommufd_get_object(ucmd->ictx, cmd->hwpt_id,
++				 IOMMUFD_OBJ_HW_PAGETABLE_S1);
++	if (IS_ERR(obj))
++		return PTR_ERR(obj);
++
++	hwpt = container_of(obj, struct iommufd_hw_pagetable, obj);
++	if (hwpt->type != IOMMUFD_HWPT_USER_S1) {
++		rc = -EINVAL;
++		goto out_put_hwpt;
++	}
++
++	dev_obj = iommufd_get_object(ucmd->ictx,
++				     cmd->dev_id, IOMMUFD_OBJ_DEVICE);
++	if (IS_ERR(dev_obj)) {
++		rc = PTR_ERR(obj);
++		goto out_put_hwpt;
++	}
++
++	idev = container_of(dev_obj, struct iommufd_device, obj);
++	rc = iommu_page_response(idev->dev, &cmd->resp);
++	iommufd_put_object(dev_obj);
++out_put_hwpt:
++	iommufd_put_object(obj);
++	return rc;
++}
+diff --git a/drivers/iommu/iommufd/iommufd_private.h b/drivers/iommu/iommufd/iommufd_private.h
+index f117c51a47ed..3400d17a5361 100644
+--- a/drivers/iommu/iommufd/iommufd_private.h
++++ b/drivers/iommu/iommufd/iommufd_private.h
+@@ -223,6 +223,7 @@ int iommufd_alloc_s1_hwpt(struct iommufd_ucmd *ucmd);
+ int iommufd_hwpt_invalidate_cache(struct iommufd_ucmd *ucmd);
+ int iommufd_alloc_pasid(struct iommufd_ucmd *ucmd);
+ int iommufd_free_pasid(struct iommufd_ucmd *ucmd);
++int iommufd_hwpt_page_response(struct iommufd_ucmd *ucmd);
+ 
+ struct iommufd_hw_pagetable_kernel {
+ 	struct iommufd_ioas *ioas;
+diff --git a/drivers/iommu/iommufd/main.c b/drivers/iommu/iommufd/main.c
+index ec474275d0ea..58157cf9e42c 100644
+--- a/drivers/iommu/iommufd/main.c
++++ b/drivers/iommu/iommufd/main.c
+@@ -199,6 +199,7 @@ union ucmd_buffer {
+ 	struct iommu_device_info info;
+ 	struct iommu_alloc_pasid alloc_pasid;
+ 	struct iommu_free_pasid free_pasid;
++	struct iommu_hwpt_page_response resp;
+ #ifdef CONFIG_IOMMUFD_TEST
+ 	struct iommu_test_cmd test;
+ #endif
+@@ -244,6 +245,8 @@ static struct iommufd_ioctl_op iommufd_ioctl_ops[] = {
+ 		 pasid),
+ 	IOCTL_OP(IOMMU_FREE_PASID, iommufd_free_pasid, struct iommu_free_pasid,
+ 		 pasid),
++	IOCTL_OP(IOMMU_PAGE_RESPONSE, iommufd_hwpt_page_response, struct iommu_hwpt_page_response,
++		 resp),
+ #ifdef CONFIG_IOMMUFD_TEST
+ 	IOCTL_OP(IOMMU_TEST_CMD, iommufd_test, struct iommu_test_cmd, last),
+ #endif
+-- 
+2.34.1
+

@@ -1,0 +1,132 @@
+From fd6e9a85a9d48c7d430f1839081e7228906843e7 Mon Sep 17 00:00:00 2001
+From: Lu Baolu <baolu.lu@linux.intel.com>
+Date: Thu, 31 Mar 2022 10:42:54 +0800
+Subject: [PATCH 034/141] iommu/sva: Basic data structures for SVA
+
+Use below data structures for SVA implementation in the IOMMU core:
+
+- struct iommu_sva_ioas
+  Represent the I/O address space shared with an application CPU address
+  space. This structure has a 1:1 relationship with an mm_struct. It
+  grabs a "mm->mm_count" refcount during creation and drop it on release.
+
+- struct iommu_domain (IOMMU_DOMAIN_SVA type)
+  Represent a hardware pagetable that the IOMMU hardware could use for
+  SVA translation. Multiple iommu domains could be bound with an SVA ioas
+  and each grabs a refcount from ioas in order to make sure ioas could
+  only be freed after all domains have been unbound.
+
+- struct iommu_sva
+  Represent a bond relationship between an SVA ioas and an iommu domain.
+  If a bond already exists, it's reused and a reference is taken.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+
+18	0	drivers/iommu/iommu-sva-lib.c
+1	0	drivers/iommu/iommu-sva-lib.h
+13	1	include/linux/iommu.h
+
+diff --git a/drivers/iommu/iommu-sva-lib.c b/drivers/iommu/iommu-sva-lib.c
+index 106506143896..d524a402be3b 100644
+--- a/drivers/iommu/iommu-sva-lib.c
++++ b/drivers/iommu/iommu-sva-lib.c
+@@ -3,6 +3,8 @@
+  * Helpers for IOMMU drivers implementing SVA
+  */
+ #include <linux/mutex.h>
++#include <linux/iommu.h>
++#include <linux/slab.h>
+ #include <linux/sched/mm.h>
+ 
+ #include "iommu-sva-lib.h"
+@@ -10,6 +12,22 @@
+ static DEFINE_MUTEX(iommu_sva_lock);
+ static DECLARE_IOASID_SET(iommu_sva_pasid);
+ 
++struct iommu_sva_ioas {
++	struct mm_struct *mm;
++	ioasid_t pasid;
++
++	/* Counter of domains attached to this ioas. */
++	refcount_t users;
++
++	/* All bindings are linked here. */
++	struct list_head bonds;
++};
++
++struct mm_struct *iommu_sva_domain_mm(struct iommu_domain *domain)
++{
++	return domain->sva_ioas->mm;
++}
++
+ /**
+  * iommu_sva_alloc_pasid - Allocate a PASID for the mm
+  * @mm: the mm
+diff --git a/drivers/iommu/iommu-sva-lib.h b/drivers/iommu/iommu-sva-lib.h
+index 8909ea1094e3..9c5e108e2c8a 100644
+--- a/drivers/iommu/iommu-sva-lib.h
++++ b/drivers/iommu/iommu-sva-lib.h
+@@ -10,6 +10,7 @@
+ 
+ int iommu_sva_alloc_pasid(struct mm_struct *mm, ioasid_t min, ioasid_t max);
+ struct mm_struct *iommu_sva_find(ioasid_t pasid);
++struct mm_struct *iommu_sva_domain_mm(struct iommu_domain *domain);
+ 
+ /* I/O Page fault */
+ struct device;
+diff --git a/include/linux/iommu.h b/include/linux/iommu.h
+index ab36244d4e94..f582f434c513 100644
+--- a/include/linux/iommu.h
++++ b/include/linux/iommu.h
+@@ -42,6 +42,7 @@ struct notifier_block;
+ struct iommu_sva;
+ struct iommu_fault_event;
+ struct iommu_dma_cookie;
++struct iommu_sva_ioas;
+ 
+ /* iommu fault flags */
+ #define IOMMU_FAULT_READ	0x0
+@@ -64,6 +65,9 @@ struct iommu_domain_geometry {
+ #define __IOMMU_DOMAIN_PT	(1U << 2)  /* Domain is identity mapped   */
+ #define __IOMMU_DOMAIN_DMA_FQ	(1U << 3)  /* DMA-API uses flush queue    */
+ 
++#define __IOMMU_DOMAIN_SHARED	(1U << 4)  /* Page table shared from CPU  */
++#define __IOMMU_DOMAIN_HOST_VA	(1U << 5)  /* Host CPU virtual address */
++
+ /*
+  * This are the possible domain-types
+  *
+@@ -86,6 +90,8 @@ struct iommu_domain_geometry {
+ #define IOMMU_DOMAIN_DMA_FQ	(__IOMMU_DOMAIN_PAGING |	\
+ 				 __IOMMU_DOMAIN_DMA_API |	\
+ 				 __IOMMU_DOMAIN_DMA_FQ)
++#define IOMMU_DOMAIN_SVA	(__IOMMU_DOMAIN_SHARED |	\
++				 __IOMMU_DOMAIN_HOST_VA)
+ 
+ struct iommu_domain {
+ 	unsigned type;
+@@ -95,6 +101,7 @@ struct iommu_domain {
+ 	void *handler_token;
+ 	struct iommu_domain_geometry geometry;
+ 	struct iommu_dma_cookie *iova_cookie;
++	struct iommu_sva_ioas *sva_ioas;
+ };
+ 
+ static inline bool iommu_is_dma_domain(struct iommu_domain *domain)
+@@ -628,7 +635,12 @@ struct iommu_fwspec {
+  * struct iommu_sva - handle to a device-mm bond
+  */
+ struct iommu_sva {
+-	struct device			*dev;
++	struct device		*dev;
++	struct iommu_sva_ioas	*sva_ioas;
++	struct iommu_domain	*domain;
++	/* Link to sva ioas's bonds list */
++	struct list_head	node;
++	refcount_t		users;
+ };
+ 
+ int iommu_fwspec_init(struct device *dev, struct fwnode_handle *iommu_fwnode,
+-- 
+2.34.1
+

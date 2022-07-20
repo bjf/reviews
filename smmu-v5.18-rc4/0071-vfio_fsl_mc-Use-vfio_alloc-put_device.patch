@@ -1,0 +1,68 @@
+From 3fb165678ec94b8557e6c07dd01bb45b1590ec92 Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Mon, 22 Nov 2021 19:31:19 +0800
+Subject: [PATCH 071/141] vfio_fsl_mc: Use vfio_alloc/put_device()
+
+Uses vfio_alloc/put_device() for the vfio_fsl_mc_device allocation, and
+no release callback is needed.
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+7	8	drivers/vfio/fsl-mc/vfio_fsl_mc.c
+
+diff --git a/drivers/vfio/fsl-mc/vfio_fsl_mc.c b/drivers/vfio/fsl-mc/vfio_fsl_mc.c
+index 3feff729f3ce..f63a1eae4723 100644
+--- a/drivers/vfio/fsl-mc/vfio_fsl_mc.c
++++ b/drivers/vfio/fsl-mc/vfio_fsl_mc.c
+@@ -525,10 +525,11 @@ static int vfio_fsl_mc_probe(struct fsl_mc_device *mc_dev)
+ 	int ret;
+ 
+ 	vdev = kzalloc(sizeof(*vdev), GFP_KERNEL);
++	vdev = vfio_alloc_device(vfio_fsl_mc_device, vdev,
++				 dev, &vfio_fsl_mc_ops);
+ 	if (!vdev)
+ 		return -ENOMEM;
+ 
+-	vfio_init_group_dev(&vdev->vdev, dev, &vfio_fsl_mc_ops);
+ 	vdev->mc_dev = mc_dev;
+ 	mutex_init(&vdev->igate);
+ 
+@@ -537,11 +538,11 @@ static int vfio_fsl_mc_probe(struct fsl_mc_device *mc_dev)
+ 	else
+ 		ret = vfio_assign_device_set(&vdev->vdev, mc_dev->dev.parent);
+ 	if (ret)
+-		goto out_uninit;
++		goto out_free;
+ 
+ 	ret = vfio_fsl_mc_init_device(vdev);
+ 	if (ret)
+-		goto out_uninit;
++		goto out_free;
+ 
+ 	ret = vfio_register_group_dev(&vdev->vdev);
+ 	if (ret) {
+@@ -559,9 +560,8 @@ static int vfio_fsl_mc_probe(struct fsl_mc_device *mc_dev)
+ 	vfio_unregister_group_dev(&vdev->vdev);
+ out_device:
+ 	vfio_fsl_uninit_device(vdev);
+-out_uninit:
+-	vfio_uninit_group_dev(&vdev->vdev);
+-	kfree(vdev);
++out_free:
++	vfio_put_device(&vdev->vdev);
+ 	return ret;
+ }
+ 
+@@ -576,8 +576,7 @@ static int vfio_fsl_mc_remove(struct fsl_mc_device *mc_dev)
+ 	dprc_remove_devices(mc_dev, NULL, 0);
+ 	vfio_fsl_uninit_device(vdev);
+ 
+-	vfio_uninit_group_dev(&vdev->vdev);
+-	kfree(vdev);
++	vfio_put_device(&vdev->vdev);
+ 	return 0;
+ }
+ 
+-- 
+2.34.1
+

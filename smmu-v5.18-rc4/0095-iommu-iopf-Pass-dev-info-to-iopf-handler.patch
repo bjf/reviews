@@ -1,0 +1,52 @@
+From 2d2cb20f05d1dcee957262ad38d2507f8b74f7f5 Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Thu, 26 May 2022 06:19:02 -0700
+Subject: [PATCH 095/141] iommu/iopf: Pass dev info to iopf handler
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+1	1	drivers/iommu/io-pgfault.c
+1	1	drivers/iommu/iommu-sva.c
+1	0	include/linux/iommu.h
+
+diff --git a/drivers/iommu/io-pgfault.c b/drivers/iommu/io-pgfault.c
+index cc02207651b7..bbd3417ae77b 100644
+--- a/drivers/iommu/io-pgfault.c
++++ b/drivers/iommu/io-pgfault.c
+@@ -88,7 +88,7 @@ static void iopf_handle_group(struct work_struct *work)
+ 		 * faults in the group if there is an error.
+ 		 */
+ 		if (status == IOMMU_PAGE_RESP_SUCCESS)
+-			status = domain->iopf_handler(&iopf->fault,
++			status = domain->iopf_handler(&iopf->fault, group->dev,
+ 						      domain->fault_data);
+ 
+ 		if (!(iopf->fault.prm.flags &
+diff --git a/drivers/iommu/iommu-sva.c b/drivers/iommu/iommu-sva.c
+index b631765fa8c0..c2f884ac3566 100644
+--- a/drivers/iommu/iommu-sva.c
++++ b/drivers/iommu/iommu-sva.c
+@@ -122,7 +122,7 @@ static void iommu_sva_ioas_put(struct iommu_sva_ioas *ioas)
+  * mmap_read_lock().
+  */
+ static enum iommu_page_response_code
+-iommu_sva_handle_iopf(struct iommu_fault *fault, void *data)
++iommu_sva_handle_iopf(struct iommu_fault *fault, struct device *dev, void *data)
+ {
+ 	vm_fault_t ret;
+ 	struct mm_struct *mm;
+diff --git a/include/linux/iommu.h b/include/linux/iommu.h
+index 1164524814cb..3002028b4547 100644
+--- a/include/linux/iommu.h
++++ b/include/linux/iommu.h
+@@ -103,6 +103,7 @@ struct iommu_domain {
+ 	struct iommu_dma_cookie *iova_cookie;
+ 	struct iommu_sva_ioas *sva_ioas;
+ 	enum iommu_page_response_code (*iopf_handler)(struct iommu_fault *fault,
++						      struct device *dev,
+ 						      void *data);
+ 	void *fault_data;
+ };
+-- 
+2.34.1
+

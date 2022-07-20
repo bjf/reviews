@@ -1,0 +1,91 @@
+From 4a6d9dd564d0e7339fc15ecc5ce66db4ad842be2 Mon Sep 17 00:00:00 2001
+From: Lu Baolu <baolu.lu@linux.intel.com>
+Date: Mon, 18 Apr 2022 08:49:52 +0800
+Subject: [PATCH 017/141] amba: Stop sharing platform_dma_configure()
+
+Stop sharing platform_dma_configure() helper as they are about to have
+their own bus dma_configure callbacks.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+Reviewed-by: Jason Gunthorpe <jgg@nvidia.com>
+Link: https://lore.kernel.org/r/20220418005000.897664-4-baolu.lu@linux.intel.com
+Signed-off-by: Joerg Roedel <jroedel@suse.de>
+
+18	1	drivers/amba/bus.c
+1	2	drivers/base/platform.c
+0	2	include/linux/platform_device.h
+
+diff --git a/drivers/amba/bus.c b/drivers/amba/bus.c
+index d3bd14aaabf6..76b52bd2c2a4 100644
+--- a/drivers/amba/bus.c
++++ b/drivers/amba/bus.c
+@@ -20,6 +20,8 @@
+ #include <linux/platform_device.h>
+ #include <linux/reset.h>
+ #include <linux/of_irq.h>
++#include <linux/of_device.h>
++#include <linux/acpi.h>
+ 
+ #define to_amba_driver(d)	container_of(d, struct amba_driver, drv)
+ 
+@@ -273,6 +275,21 @@ static void amba_shutdown(struct device *dev)
+ 		drv->shutdown(to_amba_device(dev));
+ }
+ 
++static int amba_dma_configure(struct device *dev)
++{
++	enum dev_dma_attr attr;
++	int ret = 0;
++
++	if (dev->of_node) {
++		ret = of_dma_configure(dev, dev->of_node, true);
++	} else if (has_acpi_companion(dev)) {
++		attr = acpi_get_dma_attr(to_acpi_device_node(dev->fwnode));
++		ret = acpi_dma_configure(dev, attr);
++	}
++
++	return ret;
++}
++
+ #ifdef CONFIG_PM
+ /*
+  * Hooks to provide runtime PM of the pclk (bus clock).  It is safe to
+@@ -341,7 +358,7 @@ struct bus_type amba_bustype = {
+ 	.probe		= amba_probe,
+ 	.remove		= amba_remove,
+ 	.shutdown	= amba_shutdown,
+-	.dma_configure	= platform_dma_configure,
++	.dma_configure	= amba_dma_configure,
+ 	.pm		= &amba_pm,
+ };
+ EXPORT_SYMBOL_GPL(amba_bustype);
+diff --git a/drivers/base/platform.c b/drivers/base/platform.c
+index 8cc272fd5c99..d7915734d931 100644
+--- a/drivers/base/platform.c
++++ b/drivers/base/platform.c
+@@ -1454,8 +1454,7 @@ static void platform_shutdown(struct device *_dev)
+ 		drv->shutdown(dev);
+ }
+ 
+-
+-int platform_dma_configure(struct device *dev)
++static int platform_dma_configure(struct device *dev)
+ {
+ 	enum dev_dma_attr attr;
+ 	int ret = 0;
+diff --git a/include/linux/platform_device.h b/include/linux/platform_device.h
+index 7c96f169d274..17fde717df68 100644
+--- a/include/linux/platform_device.h
++++ b/include/linux/platform_device.h
+@@ -328,8 +328,6 @@ extern int platform_pm_restore(struct device *dev);
+ #define platform_pm_restore		NULL
+ #endif
+ 
+-extern int platform_dma_configure(struct device *dev);
+-
+ #ifdef CONFIG_PM_SLEEP
+ #define USE_PLATFORM_PM_SLEEP_OPS \
+ 	.suspend = platform_pm_suspend, \
+-- 
+2.34.1
+

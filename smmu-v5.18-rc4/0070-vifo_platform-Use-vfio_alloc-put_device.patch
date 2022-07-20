@@ -1,0 +1,151 @@
+From e938f6b3f808a3e4b0d0b60bfc4d2a0764167502 Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Thu, 11 Nov 2021 17:09:11 +0800
+Subject: [PATCH 070/141] vifo_platform: Use vfio_alloc/put_device()
+
+Uses vfio_alloc/put_device() for vfio_platform_device allocation, and
+moves the name field free into vfio_platform_release().
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+6	6	drivers/vfio/platform/vfio_amba.c
+8	4	drivers/vfio/platform/vfio_platform.c
+11	3	drivers/vfio/platform/vfio_platform_common.c
+2	0	drivers/vfio/platform/vfio_platform_private.h
+
+diff --git a/drivers/vfio/platform/vfio_amba.c b/drivers/vfio/platform/vfio_amba.c
+index 1aaa4f721bd2..8995eb08ec3b 100644
+--- a/drivers/vfio/platform/vfio_amba.c
++++ b/drivers/vfio/platform/vfio_amba.c
+@@ -43,9 +43,11 @@ static int get_amba_irq(struct vfio_platform_device *vdev, int i)
+ static int vfio_amba_probe(struct amba_device *adev, const struct amba_id *id)
+ {
+ 	struct vfio_platform_device *vdev;
++	struct device *dev = &adev->dev;
+ 	int ret;
+ 
+-	vdev = kzalloc(sizeof(*vdev), GFP_KERNEL);
++	vdev = vfio_alloc_device(vfio_platform_device, vdev,
++				 dev, &vfio_platform_ops);
+ 	if (!vdev)
+ 		return -ENOMEM;
+ 
+@@ -61,10 +63,9 @@ static int vfio_amba_probe(struct amba_device *adev, const struct amba_id *id)
+ 	vdev->get_irq = get_amba_irq;
+ 	vdev->reset_required = false;
+ 
+-	ret = vfio_platform_probe_common(vdev, &adev->dev);
++	ret = vfio_platform_probe_common(vdev, dev);
+ 	if (ret) {
+-		kfree(vdev->name);
+-		kfree(vdev);
++		vfio_put_device(&vdev->vdev);
+ 		return ret;
+ 	}
+ 
+@@ -77,8 +78,7 @@ static void vfio_amba_remove(struct amba_device *adev)
+ 	struct vfio_platform_device *vdev = dev_get_drvdata(&adev->dev);
+ 
+ 	vfio_platform_remove_common(vdev);
+-	kfree(vdev->name);
+-	kfree(vdev);
++	vfio_put_device(&vdev->vdev);
+ }
+ 
+ static const struct amba_id pl330_ids[] = {
+diff --git a/drivers/vfio/platform/vfio_platform.c b/drivers/vfio/platform/vfio_platform.c
+index 04f40c5acfd6..b8cbce11b8f5 100644
+--- a/drivers/vfio/platform/vfio_platform.c
++++ b/drivers/vfio/platform/vfio_platform.c
+@@ -39,9 +39,11 @@ static int get_platform_irq(struct vfio_platform_device *vdev, int i)
+ static int vfio_platform_probe(struct platform_device *pdev)
+ {
+ 	struct vfio_platform_device *vdev;
++	struct device *dev = &pdev->dev;
+ 	int ret;
+ 
+-	vdev = kzalloc(sizeof(*vdev), GFP_KERNEL);
++	vdev = vfio_alloc_device(vfio_platform_device, vdev,
++				 dev, &vfio_platform_ops);
+ 	if (!vdev)
+ 		return -ENOMEM;
+ 
+@@ -52,9 +54,10 @@ static int vfio_platform_probe(struct platform_device *pdev)
+ 	vdev->get_irq = get_platform_irq;
+ 	vdev->reset_required = reset_required;
+ 
+-	ret = vfio_platform_probe_common(vdev, &pdev->dev);
++	ret = vfio_platform_probe_common(vdev, dev);
+ 	if (ret) {
+-		kfree(vdev);
++		vdev->name = NULL;
++		vfio_put_device(&vdev->vdev);
+ 		return ret;
+ 	}
+ 	dev_set_drvdata(&pdev->dev, vdev);
+@@ -66,7 +69,8 @@ static int vfio_platform_remove(struct platform_device *pdev)
+ 	struct vfio_platform_device *vdev = dev_get_drvdata(&pdev->dev);
+ 
+ 	vfio_platform_remove_common(vdev);
+-	kfree(vdev);
++	vdev->name = NULL;
++	vfio_put_device(&vdev->vdev);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/vfio/platform/vfio_platform_common.c b/drivers/vfio/platform/vfio_platform_common.c
+index 256f55b84e70..4fb88837ec3d 100644
+--- a/drivers/vfio/platform/vfio_platform_common.c
++++ b/drivers/vfio/platform/vfio_platform_common.c
+@@ -599,8 +599,17 @@ static int vfio_platform_mmap(struct vfio_device *core_vdev, struct vm_area_stru
+ 	return -EINVAL;
+ }
+ 
+-static const struct vfio_device_ops vfio_platform_ops = {
++static void vfio_platform_release(struct vfio_device *vdev)
++{
++	struct vfio_platform_device *vpdev =
++		container_of(vdev, struct vfio_platform_device, vdev);
++
++	kfree(vpdev->name);
++}
++
++const struct vfio_device_ops vfio_platform_ops = {
+ 	.name		= "vfio-platform",
++	.release	= vfio_platform_release,
+ 	.open_device	= vfio_platform_open_device,
+ 	.close_device	= vfio_platform_close_device,
+ 	.ioctl		= vfio_platform_ioctl,
+@@ -608,6 +617,7 @@ static const struct vfio_device_ops vfio_platform_ops = {
+ 	.write		= vfio_platform_write,
+ 	.mmap		= vfio_platform_mmap,
+ };
++EXPORT_SYMBOL_GPL(vfio_platform_ops);
+ 
+ static int vfio_platform_of_probe(struct vfio_platform_device *vdev,
+ 			   struct device *dev)
+@@ -644,8 +654,6 @@ int vfio_platform_probe_common(struct vfio_platform_device *vdev,
+ {
+ 	int ret;
+ 
+-	vfio_init_group_dev(&vdev->vdev, dev, &vfio_platform_ops);
+-
+ 	ret = vfio_platform_acpi_probe(vdev, dev);
+ 	if (ret)
+ 		ret = vfio_platform_of_probe(vdev, dev);
+diff --git a/drivers/vfio/platform/vfio_platform_private.h b/drivers/vfio/platform/vfio_platform_private.h
+index 520d2a8e8375..6845a6b01c4a 100644
+--- a/drivers/vfio/platform/vfio_platform_private.h
++++ b/drivers/vfio/platform/vfio_platform_private.h
+@@ -78,6 +78,8 @@ struct vfio_platform_reset_node {
+ 	vfio_platform_reset_fn_t of_reset;
+ };
+ 
++extern const struct vfio_device_ops vfio_platform_ops;
++
+ extern int vfio_platform_probe_common(struct vfio_platform_device *vdev,
+ 				      struct device *dev);
+ void vfio_platform_remove_common(struct vfio_platform_device *vdev);
+-- 
+2.34.1
+

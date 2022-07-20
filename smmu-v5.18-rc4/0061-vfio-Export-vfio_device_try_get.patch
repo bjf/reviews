@@ -1,0 +1,45 @@
+From 59b5dd7326a51659bbd041cb899030b6d42405db Mon Sep 17 00:00:00 2001
+From: Jason Gunthorpe <jgg@nvidia.com>
+Date: Wed, 8 Sep 2021 10:18:26 -0300
+Subject: [PATCH 061/141] vfio: Export vfio_device_try_get()
+
+vfio_ccw will need it.
+
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+2	1	drivers/vfio/vfio.c
+1	0	include/linux/vfio.h
+
+diff --git a/drivers/vfio/vfio.c b/drivers/vfio/vfio.c
+index 6a7fb8d91aaa..98bd6045b4d9 100644
+--- a/drivers/vfio/vfio.c
++++ b/drivers/vfio/vfio.c
+@@ -470,10 +470,11 @@ void vfio_device_put(struct vfio_device *device)
+ }
+ EXPORT_SYMBOL_GPL(vfio_device_put);
+ 
+-static bool vfio_device_try_get(struct vfio_device *device)
++bool vfio_device_try_get(struct vfio_device *device)
+ {
+ 	return refcount_inc_not_zero(&device->refcount);
+ }
++EXPORT_SYMBOL_GPL(vfio_device_try_get);
+ 
+ static struct vfio_device *vfio_group_get_device(struct vfio_group *group,
+ 						 struct device *dev)
+diff --git a/include/linux/vfio.h b/include/linux/vfio.h
+index 66dda06ec42d..bcd6eaaea9a5 100644
+--- a/include/linux/vfio.h
++++ b/include/linux/vfio.h
+@@ -126,6 +126,7 @@ int vfio_register_group_dev(struct vfio_device *device);
+ int vfio_register_emulated_iommu_dev(struct vfio_device *device);
+ void vfio_unregister_group_dev(struct vfio_device *device);
+ extern struct vfio_device *vfio_device_get_from_dev(struct device *dev);
++bool vfio_device_try_get(struct vfio_device *device);
+ extern void vfio_device_put(struct vfio_device *device);
+ 
+ int vfio_assign_device_set(struct vfio_device *device, void *set_id);
+-- 
+2.34.1
+

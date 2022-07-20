@@ -1,0 +1,161 @@
+From d31540d648e6d794af2a9e5ff8bfff0e7c1e4575 Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Wed, 25 May 2022 06:01:49 -0700
+Subject: [PATCH 108/141] iommufd: Add IOMMU_ALLOC_PASID
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+1	0	drivers/iommu/iommufd/Makefile
+3	0	drivers/iommu/iommufd/iommufd_private.h
+7	0	drivers/iommu/iommufd/main.c
+75	0	drivers/iommu/iommufd/pasid.c
+
+diff --git a/drivers/iommu/iommufd/Makefile b/drivers/iommu/iommufd/Makefile
+index 8aeba81800c5..be83044a5101 100644
+--- a/drivers/iommu/iommufd/Makefile
++++ b/drivers/iommu/iommufd/Makefile
+@@ -6,6 +6,7 @@ iommufd-y := \
+ 	ioas.o \
+ 	main.o \
+ 	pages.o \
++	pasid.o \
+ 	vfio_compat.o
+ 
+ iommufd-$(CONFIG_IOMMUFD_TEST) += selftest.o
+diff --git a/drivers/iommu/iommufd/iommufd_private.h b/drivers/iommu/iommufd/iommufd_private.h
+index f160654dc9a2..f117c51a47ed 100644
+--- a/drivers/iommu/iommufd/iommufd_private.h
++++ b/drivers/iommu/iommufd/iommufd_private.h
+@@ -71,6 +71,7 @@ struct iommufd_ctx {
+ 	struct file *filp;
+ 	struct xarray objects;
+ 
++	struct ioasid_set pasid_set;
+ 	struct mutex vfio_compat;
+ 	struct iommufd_ioas *vfio_ioas;
+ 	int vfio_fd;
+@@ -220,6 +221,8 @@ int iommufd_vfio_ioas(struct iommufd_ucmd *ucmd);
+ int iommufd_device_get_info(struct iommufd_ucmd *ucmd);
+ int iommufd_alloc_s1_hwpt(struct iommufd_ucmd *ucmd);
+ int iommufd_hwpt_invalidate_cache(struct iommufd_ucmd *ucmd);
++int iommufd_alloc_pasid(struct iommufd_ucmd *ucmd);
++int iommufd_free_pasid(struct iommufd_ucmd *ucmd);
+ 
+ struct iommufd_hw_pagetable_kernel {
+ 	struct iommufd_ioas *ioas;
+diff --git a/drivers/iommu/iommufd/main.c b/drivers/iommu/iommufd/main.c
+index f5b34d8bfb00..ec474275d0ea 100644
+--- a/drivers/iommu/iommufd/main.c
++++ b/drivers/iommu/iommufd/main.c
+@@ -183,6 +183,7 @@ static int iommufd_fops_release(struct inode *inode, struct file *filp)
+ 		cur++;
+ 	}
+ 	WARN_ON(!xa_empty(&ictx->objects));
++	//TODO: free pasid_set
+ 	kfree(ictx);
+ 	return 0;
+ }
+@@ -196,6 +197,8 @@ union ucmd_buffer {
+ 	struct iommu_hwpt_invalidate_s1_cache cache;
+ 	struct iommu_destroy destroy;
+ 	struct iommu_device_info info;
++	struct iommu_alloc_pasid alloc_pasid;
++	struct iommu_free_pasid free_pasid;
+ #ifdef CONFIG_IOMMUFD_TEST
+ 	struct iommu_test_cmd test;
+ #endif
+@@ -237,6 +240,10 @@ static struct iommufd_ioctl_op iommufd_ioctl_ops[] = {
+ 		 out_hwpt_id),
+ 	IOCTL_OP(IOMMU_HWPT_INVAL_S1_CACHE, iommufd_hwpt_invalidate_cache,
+ 		 struct iommu_hwpt_invalidate_s1_cache, info),
++	IOCTL_OP(IOMMU_ALLOC_PASID, iommufd_alloc_pasid, struct iommu_alloc_pasid,
++		 pasid),
++	IOCTL_OP(IOMMU_FREE_PASID, iommufd_free_pasid, struct iommu_free_pasid,
++		 pasid),
+ #ifdef CONFIG_IOMMUFD_TEST
+ 	IOCTL_OP(IOMMU_TEST_CMD, iommufd_test, struct iommu_test_cmd, last),
+ #endif
+diff --git a/drivers/iommu/iommufd/pasid.c b/drivers/iommu/iommufd/pasid.c
+new file mode 100644
+index 000000000000..8ae6faca2202
+--- /dev/null
++++ b/drivers/iommu/iommufd/pasid.c
+@@ -0,0 +1,75 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Copyright (c) Intel Corporation.
++ */
++#include <linux/iommufd.h>
++#include <linux/slab.h>
++#include <linux/iommu.h>
++#include <linux/file.h>
++#include <linux/pci.h>
++#include <linux/irqdomain.h>
++#include <linux/dma-iommu.h>
++
++#include "iommufd_private.h"
++
++#define IOASID_BITS 20
++
++struct iommufd_pasid_data {
++	ioasid_t pasid;
++	u32 vpasid;
++};
++
++int iommufd_alloc_pasid(struct iommufd_ucmd *ucmd)
++{
++	struct iommu_alloc_pasid *cmd = ucmd->cmd;
++	struct iommufd_pasid_data *pdata;
++	int rc;
++
++	if (cmd->flags & ~IOMMU_ALLOC_PASID_IDENTICAL)
++		return -EOPNOTSUPP;
++
++	if (cmd->range.min > cmd->range.max ||
++	    cmd->range.min >= (1 << IOASID_BITS) ||
++	    cmd->range.max >= (1 << IOASID_BITS))
++		return -EINVAL;
++
++	pdata = kzalloc(sizeof(*pdata), GFP_KERNEL);
++	if (!pdata)
++		return -ENOMEM;
++
++	if (!cmd->flags & IOMMU_ALLOC_PASID_IDENTICAL)
++		pdata->vpasid = cmd->pasid;
++	pdata->pasid = pdata->vpasid =
++				ioasid_alloc(&ucmd->ictx->pasid_set,
++				cmd->range.min, cmd->range.max,
++				pdata);
++	if (!pasid_valid(pdata->pasid)) {
++		rc = -ENOMEM;
++		goto out_free_mem;
++	}
++
++	cmd->pasid = pdata->pasid;
++	rc = iommufd_ucmd_respond(ucmd, sizeof(*cmd));
++	if (rc)
++		goto out_free_pasid;
++
++	return 0;
++out_free_pasid:
++	ioasid_free(pdata->pasid);
++out_free_mem:
++	kfree(pdata);
++	return rc;
++}
++
++int iommufd_free_pasid(struct iommufd_ucmd *ucmd)
++{
++	struct iommu_free_pasid *cmd = ucmd->cmd;
++
++	if (cmd->flags)
++		return -EOPNOTSUPP;
++
++	if (!pasid_valid(cmd->pasid))
++		return -EINVAL;
++
++	ioasid_free(cmd->pasid); // TODO: needs to use ioasid_put()
++	return 0;
++}
+-- 
+2.34.1
+

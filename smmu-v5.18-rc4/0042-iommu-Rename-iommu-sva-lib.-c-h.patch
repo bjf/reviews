@@ -1,0 +1,119 @@
+From c6a9dc1421963fd39aaaf7e5048ad3cfdd8c37cd Mon Sep 17 00:00:00 2001
+From: Lu Baolu <baolu.lu@linux.intel.com>
+Date: Sun, 1 May 2022 12:41:14 +0800
+Subject: [PATCH 042/141] iommu: Rename iommu-sva-lib.{c,h}
+
+Rename iommu-sva-lib.c[h] to iommu-sva.c[h] as it contains all code
+for SVA implementation in iommu core.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+
+1	1	drivers/iommu/Makefile
+1	1	drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3-sva.c
+1	1	drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+1	1	drivers/iommu/intel/iommu.c
+1	1	drivers/iommu/intel/svm.c
+1	1	drivers/iommu/io-pgfault.c
+1	1	drivers/iommu/{iommu-sva-lib.c => iommu-sva.c}
+0	0	drivers/iommu/{iommu-sva-lib.h => iommu-sva.h}
+
+diff --git a/drivers/iommu/Makefile b/drivers/iommu/Makefile
+index 44475a9b3eea..c1763476162b 100644
+--- a/drivers/iommu/Makefile
++++ b/drivers/iommu/Makefile
+@@ -27,6 +27,6 @@ obj-$(CONFIG_FSL_PAMU) += fsl_pamu.o fsl_pamu_domain.o
+ obj-$(CONFIG_S390_IOMMU) += s390-iommu.o
+ obj-$(CONFIG_HYPERV_IOMMU) += hyperv-iommu.o
+ obj-$(CONFIG_VIRTIO_IOMMU) += virtio-iommu.o
+-obj-$(CONFIG_IOMMU_SVA) += iommu-sva-lib.o io-pgfault.o
++obj-$(CONFIG_IOMMU_SVA) += iommu-sva.o io-pgfault.o
+ obj-$(CONFIG_SPRD_IOMMU) += sprd-iommu.o
+ obj-$(CONFIG_APPLE_DART) += apple-dart.o
+diff --git a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3-sva.c b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3-sva.c
+index 0ace04b27d4b..73a336e17dc8 100644
+--- a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3-sva.c
++++ b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3-sva.c
+@@ -9,7 +9,7 @@
+ #include <linux/slab.h>
+ 
+ #include "arm-smmu-v3.h"
+-#include "../../iommu-sva-lib.h"
++#include "../../iommu-sva.h"
+ #include "../../io-pgtable-arm.h"
+ 
+ struct arm_smmu_mmu_notifier {
+diff --git a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+index 543d3ef1c102..ca2bd17eec41 100644
+--- a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
++++ b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+@@ -31,7 +31,7 @@
+ #include <linux/amba/bus.h>
+ 
+ #include "arm-smmu-v3.h"
+-#include "../../iommu-sva-lib.h"
++#include "../../iommu-sva.h"
+ 
+ static bool disable_bypass = true;
+ module_param(disable_bypass, bool, 0444);
+diff --git a/drivers/iommu/intel/iommu.c b/drivers/iommu/intel/iommu.c
+index 55239d3a48a6..a51b96fa9b3a 100644
+--- a/drivers/iommu/intel/iommu.c
++++ b/drivers/iommu/intel/iommu.c
+@@ -27,7 +27,7 @@
+ #include <linux/tboot.h>
+ 
+ #include "../irq_remapping.h"
+-#include "../iommu-sva-lib.h"
++#include "../iommu-sva.h"
+ #include "pasid.h"
+ #include "cap_audit.h"
+ 
+diff --git a/drivers/iommu/intel/svm.c b/drivers/iommu/intel/svm.c
+index 6084f960ba27..38c33cde177e 100644
+--- a/drivers/iommu/intel/svm.c
++++ b/drivers/iommu/intel/svm.c
+@@ -25,7 +25,7 @@
+ 
+ #include "pasid.h"
+ #include "perf.h"
+-#include "../iommu-sva-lib.h"
++#include "../iommu-sva.h"
+ 
+ static irqreturn_t prq_event_thread(int irq, void *d);
+ static void intel_svm_drain_prq(struct device *dev, u32 pasid);
+diff --git a/drivers/iommu/io-pgfault.c b/drivers/iommu/io-pgfault.c
+index 8a2bb56e1474..a9ecf6bf5500 100644
+--- a/drivers/iommu/io-pgfault.c
++++ b/drivers/iommu/io-pgfault.c
+@@ -11,7 +11,7 @@
+ #include <linux/slab.h>
+ #include <linux/workqueue.h>
+ 
+-#include "iommu-sva-lib.h"
++#include "iommu-sva.h"
+ 
+ /**
+  * struct iopf_queue - IO Page Fault queue
+diff --git a/drivers/iommu/iommu-sva-lib.c b/drivers/iommu/iommu-sva.c
+similarity index 99%
+rename from drivers/iommu/iommu-sva-lib.c
+rename to drivers/iommu/iommu-sva.c
+index ae3595d60f38..b631765fa8c0 100644
+--- a/drivers/iommu/iommu-sva-lib.c
++++ b/drivers/iommu/iommu-sva.c
+@@ -7,7 +7,7 @@
+ #include <linux/slab.h>
+ #include <linux/sched/mm.h>
+ 
+-#include "iommu-sva-lib.h"
++#include "iommu-sva.h"
+ 
+ static DEFINE_MUTEX(iommu_sva_lock);
+ static DECLARE_IOASID_SET(iommu_sva_pasid);
+diff --git a/drivers/iommu/iommu-sva-lib.h b/drivers/iommu/iommu-sva.h
+similarity index 100%
+rename from drivers/iommu/iommu-sva-lib.h
+rename to drivers/iommu/iommu-sva.h
+-- 
+2.34.1
+

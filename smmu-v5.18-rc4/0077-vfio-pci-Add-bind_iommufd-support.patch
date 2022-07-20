@@ -1,0 +1,138 @@
+From 56ed50aba7da8e3647bbc74e8deea13950c9b3da Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Thu, 2 Dec 2021 21:12:54 +0800
+Subject: [PATCH 077/141] vfio/pci: Add bind_iommufd() support
+
+vfio pci implements the [un]bind_iommufd() callback to support iommufd.
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+1	0	drivers/vfio/pci/Kconfig
+2	0	drivers/vfio/pci/vfio_pci.c
+47	0	drivers/vfio/pci/vfio_pci_core.c
+6	0	include/linux/vfio_pci_core.h
+
+diff --git a/drivers/vfio/pci/Kconfig b/drivers/vfio/pci/Kconfig
+index 4da1914425e1..1685a883f6a4 100644
+--- a/drivers/vfio/pci/Kconfig
++++ b/drivers/vfio/pci/Kconfig
+@@ -4,6 +4,7 @@ config VFIO_PCI_CORE
+ 	tristate
+ 	select VFIO_VIRQFD
+ 	select IRQ_BYPASS_MANAGER
++	select IOMMUFD
+ 
+ config VFIO_PCI_MMAP
+ 	def_bool y if !S390
+diff --git a/drivers/vfio/pci/vfio_pci.c b/drivers/vfio/pci/vfio_pci.c
+index 129b18ede2ce..b26b98aac16f 100644
+--- a/drivers/vfio/pci/vfio_pci.c
++++ b/drivers/vfio/pci/vfio_pci.c
+@@ -128,6 +128,8 @@ static int vfio_pci_open_device(struct vfio_device *core_vdev)
+ static const struct vfio_device_ops vfio_pci_ops = {
+ 	.name		= "vfio-pci",
+ 	.release	= vfio_pci_core_release,
++	.bind_iommufd	= vfio_pci_core_bind_iommufd,
++	.unbind_iommufd	= vfio_pci_core_unbind_iommufd,
+ 	.open_device	= vfio_pci_open_device,
+ 	.close_device	= vfio_pci_core_close_device,
+ 	.ioctl		= vfio_pci_core_ioctl,
+diff --git a/drivers/vfio/pci/vfio_pci_core.c b/drivers/vfio/pci/vfio_pci_core.c
+index 1310856a65e0..7f124eaa65b4 100644
+--- a/drivers/vfio/pci/vfio_pci_core.c
++++ b/drivers/vfio/pci/vfio_pci_core.c
+@@ -637,6 +637,52 @@ int vfio_pci_register_dev_region(struct vfio_pci_core_device *vdev,
+ }
+ EXPORT_SYMBOL_GPL(vfio_pci_register_dev_region);
+ 
++int vfio_pci_core_bind_iommufd(struct vfio_device *core_vdev,
++			       struct vfio_device_bind_iommufd *bind)
++{
++	struct vfio_pci_core_device *vdev =
++		container_of(core_vdev, struct vfio_pci_core_device, vdev);
++	struct iommufd_device *idev;
++	u32 id;
++	int ret = 0;
++
++	mutex_lock(&vdev->idev_lock);
++
++	/* Allow only one iommufd per vfio_device */
++	if (vdev->idev) {
++		ret = -EBUSY;
++		goto out_unlock;
++	}
++
++	idev = iommufd_bind_pci_device(bind->iommufd, vdev->pdev, &id);
++	if (IS_ERR(idev)) {
++		ret = PTR_ERR(idev);
++		goto out_unlock;
++	}
++
++	vdev->idev = idev;
++	bind->out_devid = id;
++
++out_unlock:
++	mutex_unlock(&vdev->idev_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(vfio_pci_core_bind_iommufd);
++
++void vfio_pci_core_unbind_iommufd(struct vfio_device *core_vdev)
++{
++	struct vfio_pci_core_device *vdev =
++		container_of(core_vdev, struct vfio_pci_core_device, vdev);
++
++	mutex_lock(&vdev->idev_lock);
++	if (vdev->idev) {
++		iommufd_unbind_device(vdev->idev);
++		vdev->idev = NULL;
++	}
++	mutex_unlock(&vdev->idev_lock);
++}
++EXPORT_SYMBOL_GPL(vfio_pci_core_unbind_iommufd);
++
+ long vfio_pci_core_ioctl(struct vfio_device *core_vdev, unsigned int cmd,
+ 		unsigned long arg)
+ {
+@@ -1808,6 +1854,7 @@ vfio_pci_core_alloc_device(struct pci_dev *pdev,
+ 	INIT_LIST_HEAD(&vdev->vma_list);
+ 	INIT_LIST_HEAD(&vdev->sriov_pfs_item);
+ 	init_rwsem(&vdev->memory_lock);
++	mutex_init(&vdev->idev_lock);
+ 
+ out:
+ 	return vdev;
+diff --git a/include/linux/vfio_pci_core.h b/include/linux/vfio_pci_core.h
+index 048a5d6fccad..e35c4519cb1d 100644
+--- a/include/linux/vfio_pci_core.h
++++ b/include/linux/vfio_pci_core.h
+@@ -15,6 +15,7 @@
+ #include <linux/types.h>
+ #include <linux/uuid.h>
+ #include <linux/notifier.h>
++#include <linux/iommufd.h>
+ 
+ #ifndef VFIO_PCI_CORE_H
+ #define VFIO_PCI_CORE_H
+@@ -139,6 +140,8 @@ struct vfio_pci_core_device {
+ 	struct mutex		vma_lock;
+ 	struct list_head	vma_list;
+ 	struct rw_semaphore	memory_lock;
++	struct mutex		idev_lock;
++	struct iommufd_device	*idev;
+ };
+ 
+ #define is_intx(vdev) (vdev->irq_type == VFIO_PCI_INTX_IRQ_INDEX)
+@@ -221,6 +224,9 @@ static inline int vfio_pci_info_zdev_add_caps(struct vfio_pci_core_device *vdev,
+ void vfio_pci_core_set_params(bool nointxmask, bool is_disable_vga,
+ 			      bool is_disable_idle_d3);
+ void vfio_pci_core_release(struct vfio_device *core_dev);
++int vfio_pci_core_bind_iommufd(struct vfio_device *core_vdev,
++			       struct vfio_device_bind_iommufd *bind);
++void vfio_pci_core_unbind_iommufd(struct vfio_device *core_vdev);
+ void vfio_pci_core_close_device(struct vfio_device *core_vdev);
+ struct vfio_pci_core_device *
+ vfio_pci_core_alloc_device(struct pci_dev *pdev,
+-- 
+2.34.1
+

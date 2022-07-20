@@ -1,0 +1,49 @@
+From 125042ede191d8195f65bf50ce6075dd985b995e Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Thu, 26 May 2022 05:34:55 -0700
+Subject: [PATCH 094/141] iommu/iopf: Support ASYNC response
+
+For the case reporting page fault to userspace, the response is supposed
+to be sent in asynchronized way. iopf core can bypass the page response
+when IOMMU_PAGE_RESP_ASYNC is returned.
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+2	1	drivers/iommu/io-pgfault.c
+2	0	include/uapi/linux/iommu.h
+
+diff --git a/drivers/iommu/io-pgfault.c b/drivers/iommu/io-pgfault.c
+index a9ecf6bf5500..cc02207651b7 100644
+--- a/drivers/iommu/io-pgfault.c
++++ b/drivers/iommu/io-pgfault.c
+@@ -96,7 +96,8 @@ static void iopf_handle_group(struct work_struct *work)
+ 			kfree(iopf);
+ 	}
+ 
+-	iopf_complete_group(group->dev, &group->last_fault, status);
++	if (status != IOMMU_PAGE_RESP_ASYNC)
++		iopf_complete_group(group->dev, &group->last_fault, status);
+ 	kfree(group);
+ }
+ 
+diff --git a/include/uapi/linux/iommu.h b/include/uapi/linux/iommu.h
+index 65d8b0234f69..8c47ab07b3db 100644
+--- a/include/uapi/linux/iommu.h
++++ b/include/uapi/linux/iommu.h
+@@ -130,11 +130,13 @@ struct iommu_fault {
+  *	this device if possible. This is "Response Failure" in PCI PRI.
+  * @IOMMU_PAGE_RESP_INVALID: Could not handle this fault, don't retry the
+  *	access. This is "Invalid Request" in PCI PRI.
++ * @IOMMU_PAGE_RESP_ASYNC: Will response later by calling iommu_page_response().
+  */
+ enum iommu_page_response_code {
+ 	IOMMU_PAGE_RESP_SUCCESS = 0,
+ 	IOMMU_PAGE_RESP_INVALID,
+ 	IOMMU_PAGE_RESP_FAILURE,
++	IOMMU_PAGE_RESP_ASYNC,
+ };
+ 
+ /**
+-- 
+2.34.1
+

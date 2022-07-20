@@ -1,0 +1,134 @@
+From 8b866665fbf108e68b6bcf834b853ef4c33cacc0 Mon Sep 17 00:00:00 2001
+From: Lu Baolu <baolu.lu@linux.intel.com>
+Date: Thu, 3 Mar 2022 14:06:29 +0800
+Subject: [PATCH 037/141] arm-smmu-v3/sva: Add SVA domain support
+
+Add support for SVA domain allocation and provide an SVA-specific
+iommu_domain_ops.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+
+42	0	drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3-sva.c
+21	0	drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+14	0	drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h
+
+diff --git a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3-sva.c b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3-sva.c
+index c623dae1e115..3b843cd3ed67 100644
+--- a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3-sva.c
++++ b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3-sva.c
+@@ -541,3 +541,45 @@ void arm_smmu_sva_notifier_synchronize(void)
+ 	 */
+ 	mmu_notifier_synchronize();
+ }
++
++int arm_smmu_sva_attach_dev_pasid(struct iommu_domain *domain,
++				  struct device *dev, ioasid_t id)
++{
++	int ret = 0;
++	struct iommu_sva *handle;
++	struct mm_struct *mm = iommu_sva_domain_mm(domain);
++
++	if (domain->type != IOMMU_DOMAIN_SVA || !mm)
++		return -EINVAL;
++
++	mutex_lock(&sva_lock);
++	handle = __arm_smmu_sva_bind(dev, mm);
++	if (IS_ERR(handle))
++		ret = PTR_ERR(handle);
++	mutex_unlock(&sva_lock);
++
++	return ret;
++}
++
++void arm_smmu_sva_detach_dev_pasid(struct iommu_domain *domain,
++				   struct device *dev, ioasid_t id)
++{
++	struct arm_smmu_bond *bond = NULL, *t;
++	struct mm_struct *mm = iommu_sva_domain_mm(domain);
++	struct arm_smmu_master *master = dev_iommu_priv_get(dev);
++
++	mutex_lock(&sva_lock);
++	list_for_each_entry(t, &master->bonds, list) {
++		if (t->mm == mm) {
++			bond = t;
++			break;
++		}
++	}
++
++	if (!WARN_ON(!bond) && refcount_dec_and_test(&bond->refs)) {
++		list_del(&bond->list);
++		arm_smmu_mmu_notifier_put(bond->smmu_mn);
++		kfree(bond);
++	}
++	mutex_unlock(&sva_lock);
++}
+diff --git a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+index afc63fce6107..bd80de0bad98 100644
+--- a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
++++ b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+@@ -1995,10 +1995,31 @@ static bool arm_smmu_capable(enum iommu_cap cap)
+ 	}
+ }
+ 
++static void arm_smmu_sva_domain_free(struct iommu_domain *domain)
++{
++	kfree(domain);
++}
++
++static const struct iommu_domain_ops arm_smmu_sva_domain_ops = {
++	.attach_dev_pasid	= arm_smmu_sva_attach_dev_pasid,
++	.detach_dev_pasid	= arm_smmu_sva_detach_dev_pasid,
++	.free			= arm_smmu_sva_domain_free,
++};
++
+ static struct iommu_domain *arm_smmu_domain_alloc(unsigned type)
+ {
+ 	struct arm_smmu_domain *smmu_domain;
+ 
++	if (type == IOMMU_DOMAIN_SVA) {
++		struct iommu_domain *domain;
++
++		domain = kzalloc(sizeof(*domain), GFP_KERNEL);
++		if (domain)
++			domain->ops = &arm_smmu_sva_domain_ops;
++
++		return domain;
++	}
++
+ 	if (type != IOMMU_DOMAIN_UNMANAGED &&
+ 	    type != IOMMU_DOMAIN_DMA &&
+ 	    type != IOMMU_DOMAIN_DMA_FQ &&
+diff --git a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h
+index cd48590ada30..7631c00fdcbd 100644
+--- a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h
++++ b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h
+@@ -759,6 +759,10 @@ struct iommu_sva *arm_smmu_sva_bind(struct device *dev, struct mm_struct *mm,
+ void arm_smmu_sva_unbind(struct iommu_sva *handle);
+ u32 arm_smmu_sva_get_pasid(struct iommu_sva *handle);
+ void arm_smmu_sva_notifier_synchronize(void);
++int arm_smmu_sva_attach_dev_pasid(struct iommu_domain *domain,
++				  struct device *dev, ioasid_t id);
++void arm_smmu_sva_detach_dev_pasid(struct iommu_domain *domain,
++				   struct device *dev, ioasid_t id);
+ #else /* CONFIG_ARM_SMMU_V3_SVA */
+ static inline bool arm_smmu_sva_supported(struct arm_smmu_device *smmu)
+ {
+@@ -804,5 +808,15 @@ static inline u32 arm_smmu_sva_get_pasid(struct iommu_sva *handle)
+ }
+ 
+ static inline void arm_smmu_sva_notifier_synchronize(void) {}
++
++static inline int arm_smmu_sva_attach_dev_pasid(struct iommu_domain *domain,
++						struct device *dev, ioasid_t id)
++{
++	return -ENODEV;
++}
++
++static inline void arm_smmu_sva_detach_dev_pasid(struct iommu_domain *domain,
++						 struct device *dev,
++						 ioasid_t id) {}
+ #endif /* CONFIG_ARM_SMMU_V3_SVA */
+ #endif /* _ARM_SMMU_V3_H */
+-- 
+2.34.1
+

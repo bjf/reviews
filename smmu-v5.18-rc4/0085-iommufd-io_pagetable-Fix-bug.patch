@@ -1,0 +1,130 @@
+From 1da48fc20a9603c05ac0e88aa4bc063cc426b232 Mon Sep 17 00:00:00 2001
+From: Nicolin Chen <nicolinc@nvidia.com>
+Date: Sun, 17 Apr 2022 07:39:03 -0700
+Subject: [PATCH 085/141] iommufd/io_pagetable: Fix bug
+
+Fixes: 1067441 ("iommufd/io_pagetable: Support unmap fully contained areas")
+
+Signed-off-by: Nicolin Chen <nicolinc@nvidia.com>
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+18	6	drivers/iommu/iommufd/io_pagetable.c
+6	2	drivers/iommu/iommufd/ioas.c
+8	5	tools/testing/selftests/iommu/iommufd.c
+
+diff --git a/drivers/iommu/iommufd/io_pagetable.c b/drivers/iommu/iommufd/io_pagetable.c
+index 5142f797a812..e5afa2f65220 100644
+--- a/drivers/iommu/iommufd/io_pagetable.c
++++ b/drivers/iommu/iommufd/io_pagetable.c
+@@ -327,10 +327,17 @@ static int __iopt_unmap_iova_range(struct io_pagetable *iopt,
+ 	down_read(&iopt->domains_rwsem);
+ 	down_write(&iopt->iova_rwsem);
+ 	while ((area = iopt_area_iter_first(iopt, start, end))) {
++		unsigned long area_last = iopt_area_last_iova(area);
++		unsigned long area_first = iopt_area_iova(area);
+ 		struct iopt_pages *pages;
+ 
+-		if (!area->pages || iopt_area_iova(area) < start ||
+-		    iopt_area_last_iova(area) > end) {
++		/* Userspace should not race unmap all and map */
++		if (!area->pages) {
++			rc = -EBUSY;
++			goto out_unlock_iova;
++		}
++
++		if (area_first < start || area_last > end) {
+ 			rc = -ENOENT;
+ 			goto out_unlock_iova;
+ 		}
+@@ -343,13 +350,18 @@ static int __iopt_unmap_iova_range(struct io_pagetable *iopt,
+ 		if (rc)
+ 			goto out_unlock_domains;
+ 
+-		start = iopt_area_last_iova(area) + 1;
+-		unmapped_bytes +=
+-			iopt_area_last_iova(area) - iopt_area_iova(area) + 1;
++		start = area_last + 1;
++		unmapped_bytes += area_last - area_first + 1;
++
++		if (start == 0)
++			goto out_unlock_domains;
+ 
+ 		down_write(&iopt->iova_rwsem);
+ 	}
+-	rc = 0;
++	if (unmapped_bytes)
++		rc = 0;
++	else
++		rc = -ENOENT;
+ 
+ out_unlock_iova:
+ 	up_write(&iopt->iova_rwsem);
+diff --git a/drivers/iommu/iommufd/ioas.c b/drivers/iommu/iommufd/ioas.c
+index 37b602b50818..ecf2d4459724 100644
+--- a/drivers/iommu/iommufd/ioas.c
++++ b/drivers/iommu/iommufd/ioas.c
+@@ -15,7 +15,7 @@ void iommufd_ioas_destroy(struct iommufd_object *obj)
+ 	int rc;
+ 
+ 	rc = iopt_unmap_all(&ioas->iopt, NULL);
+-	WARN_ON(rc);
++	WARN_ON(rc == -EBUSY);
+ 	iopt_destroy_table(&ioas->iopt);
+ 	mutex_destroy(&ioas->mutex);
+ }
+@@ -247,8 +247,12 @@ int iommufd_ioas_unmap(struct iommufd_ucmd *ucmd)
+ 		rc = iopt_unmap_iova(&ioas->iopt, cmd->iova, cmd->length, &unmapped);
+ 	}
+ 
++	if (!rc) {
++		cmd->length = unmapped;
++		rc = iommufd_ucmd_respond(ucmd, sizeof(*cmd));
++	}
++
+ out_put:
+ 	iommufd_put_object(&ioas->obj);
+-	cmd->length = unmapped;
+ 	return rc;
+ }
+diff --git a/tools/testing/selftests/iommu/iommufd.c b/tools/testing/selftests/iommu/iommufd.c
+index d41dea3497b2..6fd018871b3f 100644
+--- a/tools/testing/selftests/iommu/iommufd.c
++++ b/tools/testing/selftests/iommu/iommufd.c
+@@ -373,6 +373,9 @@ TEST_F(iommufd_ioas, unmap_fully_contained_areas)
+ 	};
+ 	int i;
+ 
++	/* Give no_domain some space to rewind base_iova */
++	self->base_iova += 4 * PAGE_SIZE;
++
+ 	for (i = 0; i != 4; i++) {
+ 		map_cmd.iova = self->base_iova + i * 16 * PAGE_SIZE;
+ 		map_cmd.length = 8 * PAGE_SIZE;
+@@ -383,19 +386,19 @@ TEST_F(iommufd_ioas, unmap_fully_contained_areas)
+ 	/* Unmap not fully contained area doesn't work */
+ 	unmap_cmd.iova = self->base_iova - 4 * PAGE_SIZE;
+ 	unmap_cmd.length = 8 * PAGE_SIZE;
+-	ASSERT_EQ(ENOENT,
+-		  ioctl(self->fd, IOMMU_IOAS_UNMAP, &unmap_cmd));
++	EXPECT_ERRNO(ENOENT,
++		     ioctl(self->fd, IOMMU_IOAS_UNMAP, &unmap_cmd));
+ 
+ 	unmap_cmd.iova = self->base_iova + 3 * 16 * PAGE_SIZE + 8 * PAGE_SIZE - 4 * PAGE_SIZE;
+ 	unmap_cmd.length = 8 * PAGE_SIZE;
+-	ASSERT_EQ(ENOENT,
+-		  ioctl(self->fd, IOMMU_IOAS_UNMAP, &unmap_cmd));
++	EXPECT_ERRNO(ENOENT,
++		     ioctl(self->fd, IOMMU_IOAS_UNMAP, &unmap_cmd));
+ 
+ 	/* Unmap fully contained areas works */
+ 	unmap_cmd.iova = self->base_iova - 4 * PAGE_SIZE;
+ 	unmap_cmd.length = 3 * 16 * PAGE_SIZE + 8 * PAGE_SIZE + 4 * PAGE_SIZE;
+ 	ASSERT_EQ(0, ioctl(self->fd, IOMMU_IOAS_UNMAP, &unmap_cmd));
+-	ASSERT_EQ(32, unmap_cmd.length);
++	ASSERT_EQ(32 * PAGE_SIZE, unmap_cmd.length);
+ }
+ 
+ TEST_F(iommufd_ioas, area_auto_iova)
+-- 
+2.34.1
+

@@ -1,0 +1,198 @@
+From 97f32bf47a934761404786867d040d7211f5ffde Mon Sep 17 00:00:00 2001
+From: Brad Figg <bfigg@nvidia.com>
+Date: Tue, 19 Jul 2022 19:15:55 -0700
+Subject: [PATCH 000/141] *** SUBJECT HERE ***
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+*** BLURB HERE ***
+
+Christophe Leroy (1):
+  iommu/fsl_pamu: Prepare cleanup of powerpc's asm/prom.h
+
+Dave Jiang (1):
+  dmaengine: idxd: Separate user and kernel pasid enabling
+
+David Stevens (1):
+  iommu/vt-d: Calculate mask for non-aligned flushes
+
+Eric Auger (5):
+  iommu/arm-smmu-v3: Implement nested_domain_alloc
+  iommu/arm-smmu-v3: Allow stage 1 invalidation with unmanaged ASIDs
+  iommu/smmuv3: Implement cache_invalidate
+  iommu/smmuv3: report additional recoverable faults
+  iommu/smmuv3: Disallow nested mode in presence of HW MSI regions
+
+Jason Gunthorpe (22):
+  vfio: Delete the unbound_list
+  iommu: Introduce the domain op enforce_cache_coherency()
+  vfio: Move the Intel no-snoop control off of IOMMU_CACHE
+  iommu: Redefine IOMMU_CAP_CACHE_COHERENCY as the cap flag for
+    IOMMU_CACHE
+  vfio: Require that devices support DMA cache coherence
+  interval-tree: Add a utility to iterate over spans in an interval tree
+  iommufd: File descriptor, context, kconfig and makefiles
+  kernel/user: Allow user::locked_vm to be usable for iommufd
+  iommufd: PFN handling for iopt_pages
+  iommufd: Algorithms for PFN storage
+  iommufd: Data structure to provide IOVA to PFN mapping
+  iommufd: IOCTLs for the io_pagetable
+  iommufd: Add a HW pagetable object
+  iommufd: Add kAPI toward external drivers
+  iommufd: vfio container FD ioctl compatibility
+  iommufd: Add a selftest
+  vfio/ccw: Make the FSM complete and synchronize it to the mdev
+  vfio/mdev: Consolidate all the device_api sysfs into the core code
+  vfio/mdev: Add mdev available instance checking to the core
+  vfio/ccw: Remove private->mdev
+  vfio: Export vfio_device_try_get()
+  vfio/ccw: Move the lifecycle of the struct vfio_ccw_private to the
+    mdev
+
+Jon Nettleton (1):
+  iommu/arm-smmu: Get associated RMR info and install bypass SMR
+
+Kevin Tian (1):
+  iommufd: Overview documentation
+
+Liu Yi L (1):
+  vfio/pci: Expose PCIe PASID capability to userspace
+
+Lu Baolu (33):
+  iommu/vt-d: Drop stop marker messages
+  iommu: Add DMA ownership management interfaces
+  driver core: Add dma_cleanup callback in bus_type
+  amba: Stop sharing platform_dma_configure()
+  bus: platform,amba,fsl-mc,PCI: Add device DMA ownership management
+  PCI: pci_stub: Set driver_managed_dma
+  PCI: portdrv: Set driver_managed_dma
+  vfio: Set DMA ownership for VFIO devices
+  vfio: Remove use of vfio_group_viable()
+  vfio: Remove iommu group notifier
+  iommu: Remove iommu group changes notifier
+  iommu: Add pasid_bits field in struct dev_iommu
+  iommu: Add attach/detach_dev_pasid domain ops
+  iommu/sva: Basic data structures for SVA
+  iommu/vt-d: Remove SVM_FLAG_SUPERVISOR_MODE support
+  iommu/vt-d: Add SVA domain support
+  arm-smmu-v3/sva: Add SVA domain support
+  iommu/sva: Use attach/detach_pasid_dev in SVA interfaces
+  iommu: Remove SVA related callbacks from iommu ops
+  iommu: Prepare IOMMU domain for IOPF
+  iommu: Per-domain I/O page fault handling
+  iommu: Rename iommu-sva-lib.{c,h}
+  cover-letter: SVA and IOPF refactoring
+  iommu/vt-d: Add attach/detach_dev_pasid for defaut domain ops
+  iommu/vt-d: Flush iotlb for 1st-level page table
+  iommu/vt-d: DevIOLB invalidation for subdevices
+  iommu: Add nesting domain support
+  iommu/vt-d: Add support for nested mode translation
+  iommu/vt-d: Fix list del corruption callback
+  iommu/vt-d: Fix 0day reported compile issue
+  iommu/vt-d: Make the page fault handler generic
+  iommu: Export the IOMMU interface to the modular device driver
+  iommu: Add interface for iommu hardware information
+
+Mario Limonciello (3):
+  iommu/amd: Enable swiotlb in all cases
+  dma-iommu: Check that swiotlb is active before trying to use it
+  iommu/amd: Indicate whether DMA remap support is enabled
+
+Nicolin Chen (16):
+  iommufd: Add vfio_group_set/unset_iommufd helpers
+  vfio: Add iommufd VFIO compat support to group_fd
+  iommufd/io_pagetable: Fix bug
+  cover-letter: Apply "ACPICA: IORT: Updates for revision E.d"
+  cover-letter: Apply "[PATCH v13 0/9] ACPI/IORT: Support for IORT RMR
+    node"
+  iommu: Add iommu_get_msi_domain helper
+  iommu: Get msi_cookie in drivers
+  vfio/iommu_type1: Remove iommu_get_msi_cookie call
+  iommufd: Remove iommu_get_msi_cookie call
+  iommufd: Add iommu_stage1_config_smmu
+  WAR: iommufd: call iommu_enable_nesting
+  iommu/arm-smmu-v3: Remove ARM_SMMU_DOMAIN_NESTED
+  iommu/arm-smmu-v3: Get prepared for nested translation support
+  iommu/arm-smmu-v3: Add to_s2_cfg helper
+  iommu/arm-smmu-v3: Implement arm_smmu_get_msi_domain
+  cover-letter: Add SMMUv3 nesting support
+
+Rob Herring (1):
+  dt-bindings: iommu: Drop client node in examples
+
+Robin Murphy (3):
+  iommu: Introduce device_iommu_capable()
+  iommu: Add capability for pre-boot DMA protection
+  thunderbolt: Make iommu_dma_protection more accurate
+
+Shameer Kolothum (9):
+  ACPICA: IORT: Updates for revision E.d
+  iommu: Introduce a callback to struct iommu_resv_region
+  ACPI/IORT: Make iort_iommu_msi_get_resv_regions() return void
+  ACPI/IORT: Provide a generic helper to retrieve reserve regions
+  ACPI/IORT: Add support to retrieve IORT RMR reserved regions
+  ACPI/IORT: Add a helper to retrieve RMR info directly
+  iommu/arm-smmu-v3: Introduce strtab init helper
+  iommu/arm-smmu-v3: Refactor arm_smmu_init_bypass_stes() to force
+    bypass
+  iommu/arm-smmu-v3: Get associated RMR info and install bypass STE
+
+Suravee Suthikulpanit (1):
+  iommu/amd: Do not call sleep while holding spinlock
+
+Sven Peter (1):
+  MAINTAINERS: Merge DART into ARM/APPLE MACHINE
+
+Vasant Hegde via iommu (1):
+  iommu/amd: Remove redundant check
+
+Xiaoke Wang (1):
+  iommu/msm: Add a check for the return of kzalloc()
+
+Yang Yingliang (1):
+  iommu/dart: check return value after calling platform_get_resource()
+
+Yi Liu (38):
+  cover-letter: IOMMUFD Generic interface
+  cover-letter: Apply Jason's vfio ccw refactor
+  vfio: Add vfio_alloc/put_device()
+  vfio_pci: Use vfio_alloc_device()
+  samples/vfio-mdev/mdpy: use vfio_alloc/put_device()
+  samples/vfio-mdev/mtty: use vfio_alloc/put_device
+  samples/vfio-mdev/mbochs: Use vfio_alloc/put_device()
+  vfio_ap: Use vfio_alloc/put_device()
+  vifo_platform: Use vfio_alloc/put_device()
+  vfio_fsl_mc: Use vfio_alloc/put_device()
+  vfio_mdev: Use vfio_alloc/put_device()
+  vfio/ccw: Use vfio_alloc/put_device()
+  cover-letter: Move the vfio_device alloc/free into vfio core
+  vfio: Add cdev for vfio_device
+  vfio: Add VFIO_DEVICE_BIND_IOMMUFD
+  vfio/pci: Add bind_iommufd() support
+  vfio/pci: Add VFIO_DEVICE_ATTACH_IOAS
+  cover-letter: Adapting vfio-pci to iommufd
+  vfio: Enhance the iommufd usage in vfio under compat mode
+  cover-letter: Add vfio iommufd support in compat mode
+  iommufd/io_pagetable: Support unmap fully contained areas
+  vfio: Rename VFIO_DEVICE_DETACH_IOAS to be VFIO_DEVICE_DETACH_HWPT
+  cover-letter: iommufd basic
+  iommufd/device: Add iommufd_device_attach_pasid()
+  cover-letter: iommufd SIOV
+  uapi/iommufd: Add user structures for nesting
+  iommu/iopf: Support ASYNC response
+  iommu/iopf: Pass dev info to iopf handler
+  iommu/vt-d: Multiple fixes for PF vSVM
+  iommu: Enhancements to iommu hw info reporting
+  iommufd: Add IOMMU_DEVICE_GET_INFO
+  iommufd: Add IOMMU_ALLOC_S1_HWPT
+  iommufd: Add cache invalidation support for hwpt
+  iommufd: Add IOMMU_ALLOC_PASID
+  iommufd: Add IOMMU_PAGE_RESPONSE
+  vfio/pci: Add VFIO_DEVICE_ATTACH_HWPT
+  vfio/pci: Attach hwpt to user configured pasid
+  cover-letter: iommufd: Add iommu nesting
+
+-- 
+2.34.1
+

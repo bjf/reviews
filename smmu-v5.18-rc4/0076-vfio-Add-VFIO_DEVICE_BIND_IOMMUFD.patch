@@ -1,0 +1,184 @@
+From 18a449744f1ea01c4bacd2ebbed12572e79e8fda Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Wed, 17 Nov 2021 13:38:37 +0800
+Subject: [PATCH 076/141] vfio: Add VFIO_DEVICE_BIND_IOMMUFD
+
+This patch introduces VFIO_DEVICE_BIND_IOMMUFD, as the only contract for
+the user to acquire device access permission via /dev/vfio/devices/vfioX.
+The success of this command indicates that the target device has been
+placed in a context secure for user access and the user access via this fd
+is granted.
+
+The presence of .{un}bind_iommufd() callbacks marks whether this command
+is supported for a given vfio device type.
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+53	6	drivers/vfio/vfio.c
+3	0	include/linux/vfio.h
+35	0	include/uapi/linux/vfio.h
+
+diff --git a/drivers/vfio/vfio.c b/drivers/vfio/vfio.c
+index fb1ec523d58a..bae1c8b4974c 100644
+--- a/drivers/vfio/vfio.c
++++ b/drivers/vfio/vfio.c
+@@ -1243,8 +1243,13 @@ static int vfio_device_open_count(struct vfio_device *device)
+ static void vfio_device_close_decount(struct vfio_device *device)
+ {
+ 	mutex_lock(&device->dev_set->lock);
+-	if (device->open_count == 1 && device->ops->close_device)
+-		device->ops->close_device(device);
++	if (device->open_count == 1) {
++		if ((!device->group || !device->group->container) &&
++		    device->ops->unbind_iommufd)
++			device->ops->unbind_iommufd(device);
++		if (device->ops->close_device)
++			device->ops->close_device(device);
++	}
+ 	device->open_count--;
+ 	mutex_unlock(&device->dev_set->lock);
+ }
+@@ -1780,10 +1785,49 @@ static int vfio_ioctl_device_feature(struct vfio_device *device,
+ 	}
+ }
+ 
++static long vfio_device_bind_iommufd(struct file *filep, unsigned long arg)
++{
++	struct vfio_device_bind_iommufd bind;
++	struct vfio_device *device = container_of(filep->f_inode->i_cdev,
++						  struct vfio_device, cdev);
++	unsigned long minsz;
++	int ret;
++
++	minsz = offsetofend(struct vfio_device_bind_iommufd, iommufd);
++
++	if (copy_from_user(&bind, (void __user *)arg, minsz))
++		return -EFAULT;
++
++	if (bind.argsz < minsz || bind.flags ||
++	    bind.iommufd < 0)
++		return -EINVAL;
++
++	if (!device->ops->bind_iommufd || !device->ops->unbind_iommufd)
++		return -ENODEV;
++
++	ret = device->ops->bind_iommufd(device, &bind);
++	if (ret)
++		return ret;
++
++	/* Init private_data to unlock the device access via this fd */
++	smp_store_release(&filep->private_data, device);
++
++	return copy_to_user((void __user *)arg + minsz,
++			    &bind.out_devid,
++			    sizeof(bind.out_devid)) ? -EFAULT : 0;
++}
++
+ static long vfio_device_fops_unl_ioctl(struct file *filep,
+ 				       unsigned int cmd, unsigned long arg)
+ {
+-	struct vfio_device *device = filep->private_data;
++	struct vfio_device *device;
++
++	/* Bind is the only allowed operation before a successful bind */
++	if (cmd == VFIO_DEVICE_BIND_IOMMUFD)
++		return vfio_device_bind_iommufd(filep, arg);
++
++	/* Pair with smp_store_release() in vfio_device_bind_iommufd() */
++	device = smp_load_acquire(&filep->private_data);
+ 
+ 	if (!device)
+ 		return -EINVAL;
+@@ -1801,7 +1845,8 @@ static long vfio_device_fops_unl_ioctl(struct file *filep,
+ static ssize_t vfio_device_fops_read(struct file *filep, char __user *buf,
+ 				     size_t count, loff_t *ppos)
+ {
+-	struct vfio_device *device = filep->private_data;
++	/* Pair with smp_store_release() in vfio_device_bind_iommufd() */
++	struct vfio_device *device = smp_load_acquire(&filep->private_data);
+ 
+ 	if (!device || unlikely(!device->ops->read))
+ 		return -EINVAL;
+@@ -1813,7 +1858,8 @@ static ssize_t vfio_device_fops_write(struct file *filep,
+ 				      const char __user *buf,
+ 				      size_t count, loff_t *ppos)
+ {
+-	struct vfio_device *device = filep->private_data;
++	/* Pair with smp_store_release() in vfio_device_bind_iommufd() */
++	struct vfio_device *device = smp_load_acquire(&filep->private_data);
+ 
+ 	if (!device || unlikely(!device->ops->write))
+ 		return -EINVAL;
+@@ -1823,7 +1869,8 @@ static ssize_t vfio_device_fops_write(struct file *filep,
+ 
+ static int vfio_device_fops_mmap(struct file *filep, struct vm_area_struct *vma)
+ {
+-	struct vfio_device *device = filep->private_data;
++	/* Pair with smp_store_release() in vfio_device_bind_iommufd() */
++	struct vfio_device *device = smp_load_acquire(&filep->private_data);
+ 
+ 	if (!device || unlikely(!device->ops->mmap))
+ 		return -EINVAL;
+diff --git a/include/linux/vfio.h b/include/linux/vfio.h
+index 32abf6319dd5..e41738d1f625 100644
+--- a/include/linux/vfio.h
++++ b/include/linux/vfio.h
+@@ -75,6 +75,9 @@ struct vfio_device {
+  */
+ struct vfio_device_ops {
+ 	char	*name;
++	int	(*bind_iommufd)(struct vfio_device *vdev,
++				struct vfio_device_bind_iommufd *bind);
++	void	(*unbind_iommufd)(struct vfio_device *vdev);
+ 	int	(*open_device)(struct vfio_device *vdev);
+ 	void	(*close_device)(struct vfio_device *vdev);
+ 	void	(*release)(struct vfio_device *vdev);
+diff --git a/include/uapi/linux/vfio.h b/include/uapi/linux/vfio.h
+index fea86061b44e..5587a18660f1 100644
+--- a/include/uapi/linux/vfio.h
++++ b/include/uapi/linux/vfio.h
+@@ -190,6 +190,41 @@ struct vfio_group_status {
+ 
+ /* --------------- IOCTLs for DEVICE file descriptors --------------- */
+ 
++/*
++ * VFIO_DEVICE_BIND_IOMMUFD - _IOR(VFIO_TYPE, VFIO_BASE + 19,
++ *				struct vfio_device_bind_iommufd)
++ *
++ * Bind a vfio_device to the specified iommufd
++ *
++ * The user should provide a device cookie when calling this ioctl. The
++ * cookie is carried only in event e.g. I/O fault reported to userspace
++ * via iommufd. The user should use devid returned by this ioctl to mark
++ * the target device in other ioctls (e.g. capability query via iommufd).
++ *
++ * User is not allowed to access the device before the binding operation
++ * is completed.
++ *
++ * Unbind is automatically conducted when device fd is closed.
++ *
++ * Input parameters:
++ *	- iommufd;
++ *	- dev_cookie;
++ *
++ * Output parameters:
++ *	- devid;
++ *
++ * Return: 0 on success, -errno on failure.
++ */
++struct vfio_device_bind_iommufd {
++	__u32		argsz;
++	__u32		flags;
++	__aligned_u64	dev_cookie;
++	__s32		iommufd;
++	__u32		out_devid;
++};
++
++#define VFIO_DEVICE_BIND_IOMMUFD	_IO(VFIO_TYPE, VFIO_BASE + 19)
++
+ /**
+  * VFIO_DEVICE_GET_INFO - _IOR(VFIO_TYPE, VFIO_BASE + 7,
+  *						struct vfio_device_info)
+-- 
+2.34.1
+

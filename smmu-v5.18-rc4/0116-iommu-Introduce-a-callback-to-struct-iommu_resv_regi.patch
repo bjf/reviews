@@ -1,0 +1,77 @@
+From f53dae448738bd979cf8cadb1626314785f4c315 Mon Sep 17 00:00:00 2001
+From: Shameer Kolothum <shameerali.kolothum.thodi@huawei.com>
+Date: Wed, 15 Jun 2022 11:10:36 +0100
+Subject: [PATCH 116/141] iommu: Introduce a callback to struct
+ iommu_resv_region
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A callback is introduced to struct iommu_resv_region to free memory
+allocations associated with the reserved region. This will be useful
+when we introduce support for IORT RMR based reserved regions.
+
+Reviewed-by: Christoph Hellwig <hch@lst.de>
+Tested-by: Steven Price <steven.price@arm.com>
+Tested-by: Laurentiu Tudor <laurentiu.tudor@nxp.com>
+Tested-by: Hanjun Guo <guohanjun@huawei.com>
+Signed-off-by: Shameer Kolothum <shameerali.kolothum.thodi@huawei.com>
+
+11	5	drivers/iommu/iommu.c
+2	0	include/linux/iommu.h
+
+diff --git a/drivers/iommu/iommu.c b/drivers/iommu/iommu.c
+index 9521cd04dc98..cf23c1a02715 100644
+--- a/drivers/iommu/iommu.c
++++ b/drivers/iommu/iommu.c
+@@ -2561,16 +2561,22 @@ void iommu_put_resv_regions(struct device *dev, struct list_head *list)
+  * @list: reserved region list for device
+  *
+  * IOMMU drivers can use this to implement their .put_resv_regions() callback
+- * for simple reservations. Memory allocated for each reserved region will be
+- * freed. If an IOMMU driver allocates additional resources per region, it is
+- * going to have to implement a custom callback.
++ * for simple reservations. If a per region callback is provided that will be
++ * used to free all memory allocations associated with the reserved region or
++ * else just free up the memory for the regions. If an IOMMU driver allocates
++ * additional resources per region, it is going to have to implement a custom
++ * callback.
+  */
+ void generic_iommu_put_resv_regions(struct device *dev, struct list_head *list)
+ {
+ 	struct iommu_resv_region *entry, *next;
+ 
+-	list_for_each_entry_safe(entry, next, list, list)
+-		kfree(entry);
++	list_for_each_entry_safe(entry, next, list, list) {
++		if (entry->free)
++			entry->free(dev, entry);
++		else
++			kfree(entry);
++	}
+ }
+ EXPORT_SYMBOL(generic_iommu_put_resv_regions);
+ 
+diff --git a/include/linux/iommu.h b/include/linux/iommu.h
+index fdd03dabdca9..5529950ad1c7 100644
+--- a/include/linux/iommu.h
++++ b/include/linux/iommu.h
+@@ -152,6 +152,7 @@ enum iommu_resv_type {
+  * @length: Length of the region in bytes
+  * @prot: IOMMU Protection flags (READ/WRITE/...)
+  * @type: Type of the reserved region
++ * @free: Callback to free associated memory allocations
+  */
+ struct iommu_resv_region {
+ 	struct list_head	list;
+@@ -159,6 +160,7 @@ struct iommu_resv_region {
+ 	size_t			length;
+ 	int			prot;
+ 	enum iommu_resv_type	type;
++	void (*free)(struct device *dev, struct iommu_resv_region *region);
+ };
+ 
+ /**
+-- 
+2.34.1
+

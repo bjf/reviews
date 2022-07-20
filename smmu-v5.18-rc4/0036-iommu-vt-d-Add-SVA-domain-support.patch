@@ -1,0 +1,95 @@
+From f09f5024147a82bf1a323e84f8cef219036ac6e8 Mon Sep 17 00:00:00 2001
+From: Lu Baolu <baolu.lu@linux.intel.com>
+Date: Sun, 27 Mar 2022 15:27:26 +0800
+Subject: [PATCH 036/141] iommu/vt-d: Add SVA domain support
+
+Add support for SVA domain allocation and provide an SVA-specific
+iommu_domain_ops.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+
+10	0	drivers/iommu/intel/iommu.c
+37	0	drivers/iommu/intel/svm.c
+1	0	include/linux/intel-iommu.h
+
+diff --git a/drivers/iommu/intel/iommu.c b/drivers/iommu/intel/iommu.c
+index 99643f897f26..b5db76739e12 100644
+--- a/drivers/iommu/intel/iommu.c
++++ b/drivers/iommu/intel/iommu.c
+@@ -4343,6 +4343,16 @@ static struct iommu_domain *intel_iommu_domain_alloc(unsigned type)
+ 		return domain;
+ 	case IOMMU_DOMAIN_IDENTITY:
+ 		return &si_domain->domain;
++#ifdef CONFIG_INTEL_IOMMU_SVM
++	case IOMMU_DOMAIN_SVA:
++		dmar_domain = alloc_domain(type);
++		if (!dmar_domain)
++			return NULL;
++		domain = &dmar_domain->domain;
++		domain->ops = &intel_svm_domain_ops;
++
++		return domain;
++#endif /* CONFIG_INTEL_IOMMU_SVM */
+ 	default:
+ 		return NULL;
+ 	}
+diff --git a/drivers/iommu/intel/svm.c b/drivers/iommu/intel/svm.c
+index 574ddddaa33a..ec684d883014 100644
+--- a/drivers/iommu/intel/svm.c
++++ b/drivers/iommu/intel/svm.c
+@@ -931,3 +931,40 @@ int intel_svm_page_response(struct device *dev,
+ 	mutex_unlock(&pasid_mutex);
+ 	return ret;
+ }
++
++static int intel_svm_attach_dev_pasid(struct iommu_domain *domain,
++				      struct device *dev, ioasid_t pasid)
++{
++	struct device_domain_info *info = dev_iommu_priv_get(dev);
++	struct mm_struct *mm = iommu_sva_domain_mm(domain);
++	struct intel_iommu *iommu = info->iommu;
++	struct iommu_sva *sva;
++	int ret = 0;
++
++	mutex_lock(&pasid_mutex);
++	sva = intel_svm_bind_mm(iommu, dev, mm);
++	if (IS_ERR(sva))
++		ret = PTR_ERR(sva);
++	mutex_unlock(&pasid_mutex);
++
++	return ret;
++}
++
++static void intel_svm_detach_dev_pasid(struct iommu_domain *domain,
++				       struct device *dev, ioasid_t pasid)
++{
++	mutex_lock(&pasid_mutex);
++	intel_svm_unbind_mm(dev, pasid);
++	mutex_unlock(&pasid_mutex);
++}
++
++static void intel_svm_domain_free(struct iommu_domain *domain)
++{
++	kfree(to_dmar_domain(domain));
++}
++
++const struct iommu_domain_ops intel_svm_domain_ops = {
++	.attach_dev_pasid	= intel_svm_attach_dev_pasid,
++	.detach_dev_pasid	= intel_svm_detach_dev_pasid,
++	.free			= intel_svm_domain_free,
++};
+diff --git a/include/linux/intel-iommu.h b/include/linux/intel-iommu.h
+index 72e5d7900e71..3b4ca16f53e2 100644
+--- a/include/linux/intel-iommu.h
++++ b/include/linux/intel-iommu.h
+@@ -744,6 +744,7 @@ void intel_svm_unbind(struct iommu_sva *handle);
+ u32 intel_svm_get_pasid(struct iommu_sva *handle);
+ int intel_svm_page_response(struct device *dev, struct iommu_fault_event *evt,
+ 			    struct iommu_page_response *msg);
++extern const struct iommu_domain_ops intel_svm_domain_ops;
+ 
+ struct intel_svm_dev {
+ 	struct list_head list;
+-- 
+2.34.1
+

@@ -1,0 +1,123 @@
+From 2e172d9209bd69d362e027e8d9fbedcc11055850 Mon Sep 17 00:00:00 2001
+From: Lu Baolu <baolu.lu@linux.intel.com>
+Date: Wed, 8 Jun 2022 10:03:15 +0800
+Subject: [PATCH 103/141] iommu: Add interface for iommu hardware information
+
+The interface looks like:
+
+int iommu_get_hw_info(struct device *dev,
+		      struct iommu_hw_info *info);
+
+The struct iommu_hw_info is defined like this:
+
+struct iommu_hw_info {
+        enum iommu_hw_type iommu_hw_type;
+        union {
+                /* IOMMU_DRIVER_INTEL_V1 */
+                struct iommu_vtd_data;
+        };
+};
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+
+16	0	drivers/iommu/intel/iommu.c
+8	0	drivers/iommu/iommu.c
+17	0	include/linux/iommu.h
+
+diff --git a/drivers/iommu/intel/iommu.c b/drivers/iommu/intel/iommu.c
+index 255754707856..be77dcf9e7c4 100644
+--- a/drivers/iommu/intel/iommu.c
++++ b/drivers/iommu/intel/iommu.c
+@@ -5045,8 +5045,24 @@ static void intel_iommu_detach_device_pasid(struct iommu_domain *domain,
+ 	kfree(sinfo);
+ }
+ 
++static int intel_iommu_hw_info(struct device *dev, struct iommu_hw_info *info)
++{
++	struct intel_iommu *iommu = device_to_iommu(dev, NULL, NULL);
++
++	if (!iommu)
++		return -ENODEV;
++
++	info->type = IOMMU_DRIVER_INTEL_V1;
++	info->vtd_data.flags = 0;
++	info->vtd_data.cap_reg = iommu->cap;
++	info->vtd_data.ecap_reg = iommu->ecap;
++
++	return 0;
++}
++
+ const struct iommu_ops intel_iommu_ops = {
+ 	.capable		= intel_iommu_capable,
++	.hw_info		= intel_iommu_hw_info,
+ 	.domain_alloc		= intel_iommu_domain_alloc,
+ 	.nested_domain_alloc	= intel_nested_domain_alloc,
+ 	.probe_device		= intel_iommu_probe_device,
+diff --git a/drivers/iommu/iommu.c b/drivers/iommu/iommu.c
+index 045f168bba7c..9521cd04dc98 100644
+--- a/drivers/iommu/iommu.c
++++ b/drivers/iommu/iommu.c
+@@ -3228,3 +3228,11 @@ void iommu_domain_cache_inv(struct iommu_domain *domain,
+ 	domain->ops->cache_invalidate(domain, inv_info);
+ }
+ EXPORT_SYMBOL_GPL(iommu_domain_cache_inv);
++
++int iommu_get_hw_info(struct device *dev, struct iommu_hw_info *info)
++{
++	const struct iommu_ops *ops = dev_iommu_ops(dev);
++
++	return ops->hw_info(dev, info);
++}
++EXPORT_SYMBOL_GPL(iommu_get_hw_info);
+diff --git a/include/linux/iommu.h b/include/linux/iommu.h
+index 5abcf32a40b9..a29026fb3124 100644
+--- a/include/linux/iommu.h
++++ b/include/linux/iommu.h
+@@ -44,6 +44,7 @@ struct iommu_sva;
+ struct iommu_fault_event;
+ struct iommu_dma_cookie;
+ struct iommu_sva_ioas;
++struct iommu_hw_info;
+ 
+ /* iommu fault flags */
+ #define IOMMU_FAULT_READ	0x0
+@@ -234,6 +235,7 @@ struct iommu_iotlb_gather {
+  */
+ struct iommu_ops {
+ 	bool (*capable)(enum iommu_cap);
++	int (*hw_info)(struct device *dev, struct iommu_hw_info *info);
+ 
+ 	/* Domain allocation and freeing by the iommu driver */
+ 	struct iommu_domain *(*domain_alloc)(unsigned iommu_domain_type);
+@@ -396,6 +398,15 @@ struct dev_iommu {
+ 	unsigned int			pasid_bits;
+ };
+ 
++struct iommu_hw_info {
++	enum iommu_hw_type type;
++	union {
++		struct iommu_vtd_data vtd_data;
++	};
++};
++
++int iommu_get_hw_info(struct device *dev, struct iommu_hw_info *info);
++
+ int iommu_device_register(struct iommu_device *iommu,
+ 			  const struct iommu_ops *ops,
+ 			  struct device *hwdev);
+@@ -1098,6 +1109,12 @@ iommu_domain_cache_inv(struct iommu_domain *domain,
+ 		       struct iommu_cache_invalidate_info *inv_info)
+ {
+ }
++
++static inline int
++iommu_get_hw_info(struct device *dev, struct iommu_hw_info *info)
++{
++	return -EINVAL;
++}
+ #endif /* CONFIG_IOMMU_API */
+ 
+ #ifdef CONFIG_IOMMU_SVA
+-- 
+2.34.1
+

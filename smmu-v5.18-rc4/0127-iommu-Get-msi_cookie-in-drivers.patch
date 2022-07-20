@@ -1,0 +1,76 @@
+From 595de3eb302cf5ef8fb26be1d9cb9e561f2c0da6 Mon Sep 17 00:00:00 2001
+From: Nicolin Chen <nicolinc@nvidia.com>
+Date: Wed, 6 Jul 2022 17:03:59 -0700
+Subject: [PATCH 127/141] iommu: Get msi_cookie in drivers
+
+On a system using SMMU, MSI_IOVA_BASE is added to reserved regions for
+any device that is attached to an SMMU domain. The current msi_cookie
+thing in VFIO (and potentially in IOMMUFD) routes that MSI_IOVA_BASE,
+from reserved regions. This is a bit complicated. Instead, msi_cookie
+could be allocated to store MSI_IOVA_BASE at the end of ->attach_dev()
+callback function. This allows to simplify VFIO and IOMMUFD further.
+
+Also, drop domain->type check since new callers have the check. Then,
+temporally return 0 if msi_cookie exists to not break VFIO, until we
+fully clean it up.
+
+Change-Id: I97817ef3589fa2215ccbf0b92795d5d401225d4a
+Signed-off-by: Nicolin Chen <nicolinc@nvidia.com>
+
+3	0	drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+3	0	drivers/iommu/arm/arm-smmu/arm-smmu.c
+6	4	drivers/iommu/dma-iommu.c
+
+diff --git a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+index 39b2560a0abd..7b618e44b384 100644
+--- a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
++++ b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+@@ -2484,6 +2484,9 @@ static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev)
+ 
+ 	arm_smmu_enable_ats(master);
+ 
++	if (domain->type == IOMMU_DOMAIN_UNMANAGED && !domain->iova_cookie)
++		ret = iommu_get_msi_cookie(domain, MSI_IOVA_BASE);
++
+ out_unlock:
+ 	mutex_unlock(&smmu_domain->init_mutex);
+ 	return ret;
+diff --git a/drivers/iommu/arm/arm-smmu/arm-smmu.c b/drivers/iommu/arm/arm-smmu/arm-smmu.c
+index e02cc2d4fb4e..a6e1025e5185 100644
+--- a/drivers/iommu/arm/arm-smmu/arm-smmu.c
++++ b/drivers/iommu/arm/arm-smmu/arm-smmu.c
+@@ -1191,6 +1191,9 @@ static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev)
+ 	pm_runtime_set_autosuspend_delay(smmu->dev, 20);
+ 	pm_runtime_use_autosuspend(smmu->dev);
+ 
++	if (domain->type == IOMMU_DOMAIN_UNMANAGED && !domain->iova_cookie)
++		ret = iommu_get_msi_cookie(domain, MSI_IOVA_BASE);
++
+ rpm_put:
+ 	arm_smmu_rpm_put(smmu);
+ 	return ret;
+diff --git a/drivers/iommu/dma-iommu.c b/drivers/iommu/dma-iommu.c
+index 9f6d4cf39995..ced961e6ca16 100644
+--- a/drivers/iommu/dma-iommu.c
++++ b/drivers/iommu/dma-iommu.c
+@@ -328,11 +328,13 @@ int iommu_get_msi_cookie(struct iommu_domain *domain, dma_addr_t base)
+ {
+ 	struct iommu_dma_cookie *cookie;
+ 
+-	if (domain->type != IOMMU_DOMAIN_UNMANAGED)
+-		return -EINVAL;
+-
++	/*
++	 * Return 0 for now to keep VFIO flow unbroken. IOMMU drivers that call
++	 * this function check domain->iova_cookie, so will not be affected.
++	 * Once VFIO is cleaned up, it will be safe to remove this check.
++	 */
+ 	if (domain->iova_cookie)
+-		return -EEXIST;
++		return 0;
+ 
+ 	cookie = cookie_alloc(IOMMU_DMA_MSI_COOKIE);
+ 	if (!cookie)
+-- 
+2.34.1
+

@@ -1,0 +1,57 @@
+From 1868900a77d248fd664fa9eb2fb9b841bc52c231 Mon Sep 17 00:00:00 2001
+From: Nicolin Chen <nicolinc@nvidia.com>
+Date: Wed, 6 Jul 2022 19:36:14 -0700
+Subject: [PATCH 129/141] iommufd: Remove iommu_get_msi_cookie call
+
+Now msi_cookie is handled in the SMMU drivers, so clean this up in IOMMUFD.
+
+Change-Id: I4a76111b0071def8507afabb37cbe42314d658ba
+Signed-off-by: Nicolin Chen <nicolinc@nvidia.com>
+
+2	21	drivers/iommu/iommufd/device.c
+
+diff --git a/drivers/iommu/iommufd/device.c b/drivers/iommu/iommufd/device.c
+index 71522128f48c..1c7687ebf3c2 100644
+--- a/drivers/iommu/iommufd/device.c
++++ b/drivers/iommu/iommufd/device.c
+@@ -198,8 +198,6 @@ static int iommufd_device_setup_msi(struct iommufd_device *idev,
+ 				    phys_addr_t sw_msi_start,
+ 				    unsigned int flags)
+ {
+-	int rc;
+-
+ 	/*
+ 	 * IOMMU_CAP_INTR_REMAP means that the platform is isolating MSI,
+ 	 * nothing further to do.
+@@ -207,26 +205,9 @@ static int iommufd_device_setup_msi(struct iommufd_device *idev,
+ 	if (iommu_capable(idev->dev->bus, IOMMU_CAP_INTR_REMAP))
+ 		return 0;
+ 
+-	/*
+-	 * On ARM systems that set the global IRQ_DOMAIN_FLAG_MSI_REMAP every
+-	 * allocated iommu_domain will block interrupts by default and this
+-	 * special flow is needed to turn them back on.
+-	 */
+-	if (irq_domain_check_msi_remap()) {
+-		if (WARN_ON(!sw_msi_start))
+-			return -EPERM;
+-		/*
+-		 * iommu_get_msi_cookie() can only be called once per domain,
+-		 * it returns -EBUSY on later calls.
+-		 */
+-		if (hwpt->kernel.msi_cookie)
+-			return 0;
+-		rc = iommu_get_msi_cookie(hwpt->domain, sw_msi_start);
+-		if (rc && rc != -ENODEV)
+-			return rc;
+-		hwpt->kernel.msi_cookie = true;
++	/* On ARM systems, check MSI remapping capability at IRQ domain level */
++	if (irq_domain_check_msi_remap())
+ 		return 0;
+-	}
+ 
+ 	/*
+ 	 * Otherwise the platform has a MSI window that is not isolated. For
+-- 
+2.34.1
+

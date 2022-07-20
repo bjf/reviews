@@ -1,0 +1,73 @@
+From 72cc28372cb7d5c9682dcb5d8a99c210dd72b0ce Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Thu, 11 Nov 2021 18:17:27 +0800
+Subject: [PATCH 072/141] vfio_mdev: Use vfio_alloc/put_device()
+
+Uses vfio_alloc/put_device() for the vfio_device allocation, and no release
+callback is needed. To suit the API, struct vfio_mdev_state is added.
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+13	11	drivers/vfio/mdev/vfio_mdev.c
+
+diff --git a/drivers/vfio/mdev/vfio_mdev.c b/drivers/vfio/mdev/vfio_mdev.c
+index a90e24b0c851..8aa0d410e35a 100644
+--- a/drivers/vfio/mdev/vfio_mdev.c
++++ b/drivers/vfio/mdev/vfio_mdev.c
+@@ -17,6 +17,10 @@
+ 
+ #include "mdev_private.h"
+ 
++struct vfio_mdev_state {
++	struct vfio_device	vdev;
++};
++
+ static int vfio_mdev_open_device(struct vfio_device *core_vdev)
+ {
+ 	struct mdev_device *mdev = to_mdev_device(core_vdev->dev);
+@@ -111,24 +115,23 @@ static const struct vfio_device_ops vfio_mdev_dev_ops = {
+ 
+ static int vfio_mdev_probe(struct mdev_device *mdev)
+ {
+-	struct vfio_device *vdev;
++	struct vfio_mdev_state *vdev;
+ 	int ret;
+ 
+-	vdev = kzalloc(sizeof(*vdev), GFP_KERNEL);
++	vdev = vfio_alloc_device(vfio_mdev_state, vdev,
++				 &mdev->dev, &vfio_mdev_dev_ops);
+ 	if (!vdev)
+ 		return -ENOMEM;
+ 
+-	vfio_init_group_dev(vdev, &mdev->dev, &vfio_mdev_dev_ops);
+-	ret = vfio_register_emulated_iommu_dev(vdev);
++	ret = vfio_register_emulated_iommu_dev(&vdev->vdev);
+ 	if (ret)
+-		goto out_uninit;
++		goto out_put;
+ 
+-	dev_set_drvdata(&mdev->dev, vdev);
++	dev_set_drvdata(&mdev->dev, &vdev->vdev);
+ 	return 0;
+ 
+-out_uninit:
+-	vfio_uninit_group_dev(vdev);
+-	kfree(vdev);
++out_put:
++	vfio_put_device(&vdev->vdev);
+ 	return ret;
+ }
+ 
+@@ -137,8 +140,7 @@ static void vfio_mdev_remove(struct mdev_device *mdev)
+ 	struct vfio_device *vdev = dev_get_drvdata(&mdev->dev);
+ 
+ 	vfio_unregister_group_dev(vdev);
+-	vfio_uninit_group_dev(vdev);
+-	kfree(vdev);
++	vfio_put_device(vdev);
+ }
+ 
+ struct mdev_driver vfio_mdev_driver = {
+-- 
+2.34.1
+

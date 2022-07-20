@@ -1,0 +1,195 @@
+From 1220b51fe951ceb37181f126041083e23c6f72e2 Mon Sep 17 00:00:00 2001
+From: Jason Gunthorpe <jgg@nvidia.com>
+Date: Wed, 24 Nov 2021 12:51:25 -0400
+Subject: [PATCH 044/141] interval-tree: Add a utility to iterate over spans in
+ an interval tree
+
+The span iterator travels over the indexes of the interval_tree, not the
+nodes, and classifies spans of indexes as either 'used' or 'hole'.
+
+'used' spans are fully covered by nodes in the tree and 'hole' spans have
+no node intersecting the span.
+
+This is done greedily such that spans are maximally sized and every
+iteration step switches between used/hole.
+
+As an example a trivial allocator can be written as:
+
+	for (interval_tree_span_iter_first(&span, itree, 0, ULONG_MAX);
+	     !interval_tree_span_iter_done(&span);
+	     interval_tree_span_iter_next(&span))
+		if (span.is_hole &&
+		    span.last_hole - span.start_hole >= allocation_size - 1)
+			return span.start_hole;
+
+With all the tricky boundary conditions handled by the library code.
+
+The following iommufd patches have several algorithms for two of its
+overlapping node interval trees that are significantly simplified with
+this kind of iteration primitive. As it seems generally useful, put it
+into lib/.
+
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+
+41	0	include/linux/interval_tree.h
+98	0	lib/interval_tree.c
+
+diff --git a/include/linux/interval_tree.h b/include/linux/interval_tree.h
+index 288c26f50732..3817af0fa540 100644
+--- a/include/linux/interval_tree.h
++++ b/include/linux/interval_tree.h
+@@ -27,4 +27,45 @@ extern struct interval_tree_node *
+ interval_tree_iter_next(struct interval_tree_node *node,
+ 			unsigned long start, unsigned long last);
+ 
++/*
++ * This iterator travels over spans in an interval tree. It does not return
++ * nodes but classifies each span as either a hole, where no nodes intersect, or
++ * a used, which is fully covered by nodes. Each iteration step toggles between
++ * hole and used until the entire range is covered. The returned spans always
++ * fully cover the requested range.
++ *
++ * The iterator is greedy, it always returns the largest hole or used possible,
++ * consolidating all consecutive nodes.
++ *
++ * Only is_hole, start_hole/used and last_hole/used are part of the external
++ * interface.
++ */
++struct interval_tree_span_iter {
++	struct interval_tree_node *nodes[2];
++	unsigned long first_index;
++	unsigned long last_index;
++	union {
++		unsigned long start_hole;
++		unsigned long start_used;
++	};
++	union {
++		unsigned long last_hole;
++		unsigned long last_used;
++	};
++	/* 0 == used, 1 == is_hole, -1 == done iteration */
++	int is_hole;
++};
++
++void interval_tree_span_iter_first(struct interval_tree_span_iter *state,
++				   struct rb_root_cached *itree,
++				   unsigned long first_index,
++				   unsigned long last_index);
++void interval_tree_span_iter_next(struct interval_tree_span_iter *state);
++
++static inline bool
++interval_tree_span_iter_done(struct interval_tree_span_iter *state)
++{
++	return state->is_hole == -1;
++}
++
+ #endif	/* _LINUX_INTERVAL_TREE_H */
+diff --git a/lib/interval_tree.c b/lib/interval_tree.c
+index 593ce56ece50..5dff0da02092 100644
+--- a/lib/interval_tree.c
++++ b/lib/interval_tree.c
+@@ -15,3 +15,101 @@ EXPORT_SYMBOL_GPL(interval_tree_insert);
+ EXPORT_SYMBOL_GPL(interval_tree_remove);
+ EXPORT_SYMBOL_GPL(interval_tree_iter_first);
+ EXPORT_SYMBOL_GPL(interval_tree_iter_next);
++
++static void
++interval_tree_span_iter_next_gap(struct interval_tree_span_iter *state)
++{
++	struct interval_tree_node *cur = state->nodes[1];
++
++	/*
++	 * Roll nodes[1] into nodes[0] by advancing nodes[1] to the end of a
++	 * contiguous span of nodes. This makes nodes[0]->last the end of that
++	 * contiguous span of valid indexes that started at the original
++	 * nodes[1]->start. nodes[1] is now the next node and a hole is between
++	 * nodes[0] and [1].
++	 */
++	state->nodes[0] = cur;
++	do {
++		if (cur->last > state->nodes[0]->last)
++			state->nodes[0] = cur;
++		cur = interval_tree_iter_next(cur, state->first_index,
++					      state->last_index);
++	} while (cur && (state->nodes[0]->last >= cur->start ||
++			 state->nodes[0]->last + 1 == cur->start));
++	state->nodes[1] = cur;
++}
++
++void interval_tree_span_iter_first(struct interval_tree_span_iter *iter,
++				   struct rb_root_cached *itree,
++				   unsigned long first_index,
++				   unsigned long last_index)
++{
++	iter->first_index = first_index;
++	iter->last_index = last_index;
++	iter->nodes[0] = NULL;
++	iter->nodes[1] =
++		interval_tree_iter_first(itree, first_index, last_index);
++	if (!iter->nodes[1]) {
++		/* No nodes intersect the span, whole span is hole */
++		iter->start_hole = first_index;
++		iter->last_hole = last_index;
++		iter->is_hole = 1;
++		return;
++	}
++	if (iter->nodes[1]->start > first_index) {
++		/* Leading hole on first iteration */
++		iter->start_hole = first_index;
++		iter->last_hole = iter->nodes[1]->start - 1;
++		iter->is_hole = 1;
++		interval_tree_span_iter_next_gap(iter);
++		return;
++	}
++
++	/* Starting inside a used */
++	iter->start_used = first_index;
++	iter->is_hole = 0;
++	interval_tree_span_iter_next_gap(iter);
++	iter->last_used = iter->nodes[0]->last;
++	if (iter->last_used >= last_index) {
++		iter->last_used = last_index;
++		iter->nodes[0] = NULL;
++		iter->nodes[1] = NULL;
++	}
++}
++EXPORT_SYMBOL_GPL(interval_tree_span_iter_first);
++
++void interval_tree_span_iter_next(struct interval_tree_span_iter *iter)
++{
++	if (!iter->nodes[0] && !iter->nodes[1]) {
++		iter->is_hole = -1;
++		return;
++	}
++
++	if (iter->is_hole) {
++		iter->start_used = iter->last_hole + 1;
++		iter->last_used = iter->nodes[0]->last;
++		if (iter->last_used >= iter->last_index) {
++			iter->last_used = iter->last_index;
++			iter->nodes[0] = NULL;
++			iter->nodes[1] = NULL;
++		}
++		iter->is_hole = 0;
++		return;
++	}
++
++	if (!iter->nodes[1]) {
++		/* Trailing hole */
++		iter->start_hole = iter->nodes[0]->last + 1;
++		iter->last_hole = iter->last_index;
++		iter->nodes[0] = NULL;
++		iter->is_hole = 1;
++		return;
++	}
++
++	/* must have both nodes[0] and [1], interior hole */
++	iter->start_hole = iter->nodes[0]->last + 1;
++	iter->last_hole = iter->nodes[1]->start - 1;
++	iter->is_hole = 1;
++	interval_tree_span_iter_next_gap(iter);
++}
++EXPORT_SYMBOL_GPL(interval_tree_span_iter_next);
+-- 
+2.34.1
+

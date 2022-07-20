@@ -1,0 +1,111 @@
+From 7ced756a9e4fa6f2b12cfb3f9eac74c86a231d73 Mon Sep 17 00:00:00 2001
+From: Yi Liu <yi.l.liu@intel.com>
+Date: Wed, 11 May 2022 06:55:58 -0700
+Subject: [PATCH 105/141] iommufd: Add IOMMU_DEVICE_GET_INFO
+
+Under iommu nested translation, userspace owns the first stage translation
+structure (e.g. 1st stage page table of Intel VT-d or pasid table of ARM).
+Hence, userspace should know the iommu hardware capability before creating
+and configuring its translation structure to kernel. IOMMU_DEVICE_GET_INFO
+is added for querying the iommu hardware capability for a given device.
+
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+47	0	drivers/iommu/iommufd/device.c
+1	0	drivers/iommu/iommufd/iommufd_private.h
+3	0	drivers/iommu/iommufd/main.c
+
+diff --git a/drivers/iommu/iommufd/device.c b/drivers/iommu/iommufd/device.c
+index 13e4bd11d175..9357e869835b 100644
+--- a/drivers/iommu/iommufd/device.c
++++ b/drivers/iommu/iommufd/device.c
+@@ -125,6 +125,53 @@ void iommufd_unbind_device(struct iommufd_device *idev)
+ }
+ EXPORT_SYMBOL_GPL(iommufd_unbind_device);
+ 
++int iommufd_device_get_info(struct iommufd_ucmd *ucmd)
++{
++	struct iommu_device_info *cmd = ucmd->cmd;
++	struct iommufd_object *obj;
++	struct iommufd_device *idev;
++	struct iommu_hw_info hw_info;
++	u32 user_length;
++	int rc;
++
++	if (cmd->flags || cmd->reserved || cmd->dev_id == IOMMUFD_INVALID_ID)
++		return -EOPNOTSUPP;
++
++	obj = iommufd_get_object(ucmd->ictx, cmd->dev_id, IOMMUFD_OBJ_DEVICE);
++	if (IS_ERR(obj))
++		return PTR_ERR(obj);
++
++	idev = container_of(obj, struct iommufd_device, obj);
++
++	rc = iommu_get_hw_info(idev->dev, &hw_info);
++	if (rc < 0)
++		goto out_put;
++
++	cmd->iommu_hw_type = hw_info.type;
++
++	if (hw_info.data_length <= cmd->hw_data_len &&
++	    copy_to_user((void __user *)cmd->hw_data_ptr,
++			 &hw_info.data, hw_info.data_length)) {
++		rc = -EFAULT;
++		goto out_put;
++	}
++
++	user_length = cmd->hw_data_len;
++	cmd->hw_data_len = hw_info.data_length;
++
++	rc = iommufd_ucmd_respond(ucmd, sizeof(*cmd));
++	if (rc)
++		goto out_put;
++
++	if (hw_info.data_length > user_length) {
++		rc = -EMSGSIZE;
++	}
++
++out_put:
++	iommufd_put_object(obj);
++	return rc;
++}
++
+ static bool iommufd_hw_pagetable_has_group(struct iommufd_hw_pagetable *hwpt,
+ 					   struct iommu_group *group)
+ {
+diff --git a/drivers/iommu/iommufd/iommufd_private.h b/drivers/iommu/iommufd/iommufd_private.h
+index 382704f4d698..cf27b601b9d9 100644
+--- a/drivers/iommu/iommufd/iommufd_private.h
++++ b/drivers/iommu/iommufd/iommufd_private.h
+@@ -198,6 +198,7 @@ int iommufd_ioas_map(struct iommufd_ucmd *ucmd);
+ int iommufd_ioas_copy(struct iommufd_ucmd *ucmd);
+ int iommufd_ioas_unmap(struct iommufd_ucmd *ucmd);
+ int iommufd_vfio_ioas(struct iommufd_ucmd *ucmd);
++int iommufd_device_get_info(struct iommufd_ucmd *ucmd);
+ 
+ /*
+  * A HW pagetable is called an iommu_domain inside the kernel. This user object
+diff --git a/drivers/iommu/iommufd/main.c b/drivers/iommu/iommufd/main.c
+index 0e34426eec9f..92e6d999fb6f 100644
+--- a/drivers/iommu/iommufd/main.c
++++ b/drivers/iommu/iommufd/main.c
+@@ -193,6 +193,7 @@ union ucmd_buffer {
+ 	struct iommu_ioas_map map;
+ 	struct iommu_ioas_unmap unmap;
+ 	struct iommu_destroy destroy;
++	struct iommu_device_info info;
+ #ifdef CONFIG_IOMMUFD_TEST
+ 	struct iommu_test_cmd test;
+ #endif
+@@ -228,6 +229,8 @@ static struct iommufd_ioctl_op iommufd_ioctl_ops[] = {
+ 		 length),
+ 	IOCTL_OP(IOMMU_VFIO_IOAS, iommufd_vfio_ioas, struct iommu_vfio_ioas,
+ 		 __reserved),
++	IOCTL_OP(IOMMU_DEVICE_GET_INFO, iommufd_device_get_info, struct iommu_device_info,
++		 hw_data_ptr),
+ #ifdef CONFIG_IOMMUFD_TEST
+ 	IOCTL_OP(IOMMU_TEST_CMD, iommufd_test, struct iommu_test_cmd, last),
+ #endif
+-- 
+2.34.1
+

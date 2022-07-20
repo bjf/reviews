@@ -1,0 +1,63 @@
+From 3841a93abc47bd037634fd005bf8424f9c2321b4 Mon Sep 17 00:00:00 2001
+From: Eric Auger <eric.auger@redhat.com>
+Date: Mon, 2 Nov 2020 14:47:02 +0100
+Subject: [PATCH 140/141] iommu/smmuv3: Disallow nested mode in presence of HW
+ MSI regions
+
+Nested mode currently is not compatible with HW MSI reserved regions.
+Indeed MSI transactions targeting those MSI doorbells bypass the SMMU.
+This would require the guest to also bypass those ranges but the guest
+has no information about them.
+
+Let's check nested mode is not attempted in such configuration.
+
+Change-Id: I05878e04579e01564d843d49255f10d90c2c6450
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+
+24	0	drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+
+diff --git a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+index 6477b9db936a..73d83185099a 100644
+--- a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
++++ b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+@@ -2532,6 +2532,23 @@ static void arm_smmu_detach_dev(struct arm_smmu_master *master)
+ 	arm_smmu_install_ste_for_dev(master);
+ }
+ 
++static bool arm_smmu_has_hw_msi_resv_region(struct device *dev)
++{
++	struct iommu_resv_region *region;
++	bool has_msi_resv_region = false;
++	LIST_HEAD(resv_regions);
++
++	iommu_get_resv_regions(dev, &resv_regions);
++	list_for_each_entry(region, &resv_regions, list) {
++		if (region->type == IOMMU_RESV_MSI) {
++			has_msi_resv_region = true;
++			break;
++		}
++	}
++	iommu_put_resv_regions(dev, &resv_regions);
++	return has_msi_resv_region;
++}
++
+ static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev)
+ {
+ 	int ret = 0;
+@@ -2557,6 +2574,13 @@ static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev)
+ 		return -EBUSY;
+ 	}
+ 
++	/* Nested mode is not compatible with MSI HW reserved regions */
++	if (domain->type == IOMMU_DOMAIN_NESTING &&
++	    arm_smmu_has_hw_msi_resv_region(dev)) {
++		ret = -EINVAL;
++		goto out_unlock;
++	}
++
+ 	arm_smmu_detach_dev(master);
+ 
+ 	mutex_lock(&smmu_domain->init_mutex);
+-- 
+2.34.1
+

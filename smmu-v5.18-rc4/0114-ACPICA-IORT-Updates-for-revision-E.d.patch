@@ -1,0 +1,85 @@
+From f7f6ccfb69c06df67784d0212fbf5582c28b8142 Mon Sep 17 00:00:00 2001
+From: Shameer Kolothum <shameerali.kolothum.thodi@huawei.com>
+Date: Mon, 11 Apr 2022 21:02:33 +0200
+Subject: [PATCH 114/141] ACPICA: IORT: Updates for revision E.d
+
+ACPICA commit 87a2e39b8abdfedfb86b0a105708e37e895becd9
+
+IORT revision is now updated to E.d (ARM DEN 0049E.d) and
+contains a few additions like,
+    -Added descriptor in the root complex node for specifying
+     PASID width supported by the root complex.
+    -Updated RMR node Flags field.
+    -Introduced memory access attributes in the RMR node.
+
+Please note that IORT Rev E.c is deprecated and not supported.
+
+Link: https://github.com/acpica/acpica/commit/87a2e39b
+Signed-off-by: Shameer Kolothum <shameerali.kolothum.thodi@huawei.com>
+Signed-off-by: Bob Moore <robert.moore@intel.com>
+Signed-off-by: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
+
+25	2	include/acpi/actbl2.h
+
+diff --git a/include/acpi/actbl2.h b/include/acpi/actbl2.h
+index 16847c8d9d5f..2211b79c4db0 100644
+--- a/include/acpi/actbl2.h
++++ b/include/acpi/actbl2.h
+@@ -277,7 +277,7 @@ struct acpi_table_bdat {
+  * IORT - IO Remapping Table
+  *
+  * Conforms to "IO Remapping Table System Software on ARM Platforms",
+- * Document number: ARM DEN 0049E.b, Feb 2021
++ * Document number: ARM DEN 0049E.d, Feb 2022
+  *
+  ******************************************************************************/
+ 
+@@ -374,7 +374,8 @@ struct acpi_iort_root_complex {
+ 	u32 ats_attribute;
+ 	u32 pci_segment_number;
+ 	u8 memory_address_limit;	/* Memory address size limit */
+-	u8 reserved[3];		/* Reserved, must be zero */
++	u16 pasid_capabilities;	/* PASID Capabilities */
++	u8 reserved[1];		/* Reserved, must be zero */
+ };
+ 
+ /* Masks for ats_attribute field above */
+@@ -383,6 +384,9 @@ struct acpi_iort_root_complex {
+ #define ACPI_IORT_PRI_SUPPORTED         (1<<1)	/* The root complex PRI support */
+ #define ACPI_IORT_PASID_FWD_SUPPORTED   (1<<2)	/* The root complex PASID forward support */
+ 
++/* Masks for pasid_capabilities field above */
++#define ACPI_IORT_PASID_MAX_WIDTH       (0x1F)	/* Bits 0-4 */
++
+ struct acpi_iort_smmu {
+ 	u64 base_address;	/* SMMU base address */
+ 	u64 span;		/* Length of memory range */
+@@ -458,6 +462,25 @@ struct acpi_iort_rmr {
+ 	u32 rmr_offset;
+ };
+ 
++/* Masks for Flags field above */
++#define ACPI_IORT_RMR_REMAP_PERMITTED      (1)
++#define ACPI_IORT_RMR_ACCESS_PRIVILEGE     (1<<1)
++
++/*
++ * Macro to access the Access Attributes in flags field above:
++ *  Access Attributes is encoded in bits 9:2
++ */
++#define ACPI_IORT_RMR_ACCESS_ATTRIBUTES(flags)          (((flags) >> 2) & 0xFF)
++
++/* Values for above Access Attributes */
++
++#define ACPI_IORT_RMR_ATTR_DEVICE_NGNRNE   0x00
++#define ACPI_IORT_RMR_ATTR_DEVICE_NGNRE    0x01
++#define ACPI_IORT_RMR_ATTR_DEVICE_NGRE     0x02
++#define ACPI_IORT_RMR_ATTR_DEVICE_GRE      0x03
++#define ACPI_IORT_RMR_ATTR_NORMAL_NC       0x04
++#define ACPI_IORT_RMR_ATTR_NORMAL_IWB_OWB  0x05
++
+ struct acpi_iort_rmr_desc {
+ 	u64 base_address;
+ 	u64 length;
+-- 
+2.34.1
+

@@ -1,0 +1,231 @@
+From 8faa41d9948833623ef2027faf821e29b0e6dd29 Mon Sep 17 00:00:00 2001
+From: Jason Gunthorpe <jgg@nvidia.com>
+Date: Tue, 7 Sep 2021 20:50:47 -0300
+Subject: [PATCH 060/141] vfio/ccw: Remove private->mdev
+
+Having a mdev pointer floating about in addition to a struct vfio_device
+is confusing. It is only used for three things:
+
+- Getting the mdev 'struct device *' - this is the same as
+     private->vdev.dev
+
+- Printing the uuid of the mdev in logging. The uuid is also the dev_name
+  of the mdev so this is the same string as
+     dev_name(private->vdev.dev)
+
+- A weird attempt to fence the vfio_ccw_sch_io_todo() work. This work is
+  only queued during states IDLE/PROCESSING/PENDING and flushed when
+  entering CLOSED. Thus the work already cannot run when the mdev is NULL.
+  Remove it.
+
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+
+3	3	drivers/s390/cio/vfio_ccw_drv.c
+21	27	drivers/s390/cio/vfio_ccw_fsm.c
+6	10	drivers/s390/cio/vfio_ccw_ops.c
+0	2	drivers/s390/cio/vfio_ccw_private.h
+0	4	include/linux/mdev.h
+
+diff --git a/drivers/s390/cio/vfio_ccw_drv.c b/drivers/s390/cio/vfio_ccw_drv.c
+index 9bb39f8513b2..7eef680e0bdd 100644
+--- a/drivers/s390/cio/vfio_ccw_drv.c
++++ b/drivers/s390/cio/vfio_ccw_drv.c
+@@ -64,7 +64,7 @@ static void vfio_ccw_sch_io_todo(struct work_struct *work)
+ 	 * has finished. Do not overwrite a possible processing
+ 	 * state if the final interrupt was for HSCH or CSCH.
+ 	 */
+-	if (private->mdev && cp_is_finished)
++	if (cp_is_finished)
+ 		private->state = VFIO_CCW_STATE_IDLE;
+ 
+ 	if (private->io_trigger)
+@@ -297,8 +297,8 @@ static int vfio_ccw_chp_event(struct subchannel *sch,
+ 		return 0;
+ 
+ 	trace_vfio_ccw_chp_event(private->sch->schid, mask, event);
+-	VFIO_CCW_MSG_EVENT(2, "%pUl (%x.%x.%04x): mask=0x%x event=%d\n",
+-			   mdev_uuid(private->mdev), sch->schid.cssid,
++	VFIO_CCW_MSG_EVENT(2, "%s (%x.%x.%04x): mask=0x%x event=%d\n",
++			   dev_name(private->vdev.dev), sch->schid.cssid,
+ 			   sch->schid.ssid, sch->schid.sch_no,
+ 			   mask, event);
+ 
+diff --git a/drivers/s390/cio/vfio_ccw_fsm.c b/drivers/s390/cio/vfio_ccw_fsm.c
+index 64ff1a5e3cb4..0d4d4f425bef 100644
+--- a/drivers/s390/cio/vfio_ccw_fsm.c
++++ b/drivers/s390/cio/vfio_ccw_fsm.c
+@@ -245,7 +245,6 @@ static void fsm_io_request(struct vfio_ccw_private *private,
+ 	union orb *orb;
+ 	union scsw *scsw = &private->scsw;
+ 	struct ccw_io_region *io_region = private->io_region;
+-	struct mdev_device *mdev = private->mdev;
+ 	char *errstr = "request";
+ 	struct subchannel_id schid = get_schid(private);
+ 
+@@ -258,32 +257,30 @@ static void fsm_io_request(struct vfio_ccw_private *private,
+ 		/* Don't try to build a cp if transport mode is specified. */
+ 		if (orb->tm.b) {
+ 			io_region->ret_code = -EOPNOTSUPP;
+-			VFIO_CCW_MSG_EVENT(2,
+-					   "%pUl (%x.%x.%04x): transport mode\n",
+-					   mdev_uuid(mdev), schid.cssid,
+-					   schid.ssid, schid.sch_no);
++			VFIO_CCW_MSG_EVENT(
++				2, "%s (%x.%x.%04x): transport mode\n",
++				dev_name(private->vdev.dev), schid.cssid,
++				schid.ssid, schid.sch_no);
+ 			errstr = "transport mode";
+ 			goto err_out;
+ 		}
+-		io_region->ret_code = cp_init(&private->cp, mdev_dev(mdev),
++		io_region->ret_code = cp_init(&private->cp, private->vdev.dev,
+ 					      orb);
+ 		if (io_region->ret_code) {
+-			VFIO_CCW_MSG_EVENT(2,
+-					   "%pUl (%x.%x.%04x): cp_init=%d\n",
+-					   mdev_uuid(mdev), schid.cssid,
+-					   schid.ssid, schid.sch_no,
+-					   io_region->ret_code);
++			VFIO_CCW_MSG_EVENT(2, "%s (%x.%x.%04x): cp_init=%d\n",
++					   dev_name(private->vdev.dev),
++					   schid.cssid, schid.ssid,
++					   schid.sch_no, io_region->ret_code);
+ 			errstr = "cp init";
+ 			goto err_out;
+ 		}
+ 
+ 		io_region->ret_code = cp_prefetch(&private->cp);
+ 		if (io_region->ret_code) {
+-			VFIO_CCW_MSG_EVENT(2,
+-					   "%pUl (%x.%x.%04x): cp_prefetch=%d\n",
+-					   mdev_uuid(mdev), schid.cssid,
+-					   schid.ssid, schid.sch_no,
+-					   io_region->ret_code);
++			VFIO_CCW_MSG_EVENT(
++				2, "%s (%x.%x.%04x): cp_prefetch=%d\n",
++				dev_name(private->vdev.dev), schid.cssid,
++				schid.ssid, schid.sch_no, io_region->ret_code);
+ 			errstr = "cp prefetch";
+ 			cp_free(&private->cp);
+ 			goto err_out;
+@@ -292,28 +289,25 @@ static void fsm_io_request(struct vfio_ccw_private *private,
+ 		/* Start channel program and wait for I/O interrupt. */
+ 		io_region->ret_code = fsm_io_helper(private);
+ 		if (io_region->ret_code) {
+-			VFIO_CCW_MSG_EVENT(2,
+-					   "%pUl (%x.%x.%04x): fsm_io_helper=%d\n",
+-					   mdev_uuid(mdev), schid.cssid,
+-					   schid.ssid, schid.sch_no,
+-					   io_region->ret_code);
++			VFIO_CCW_MSG_EVENT(
++				2, "%s (%x.%x.%04x): fsm_io_helper=%d\n",
++				dev_name(private->vdev.dev), schid.cssid,
++				schid.ssid, schid.sch_no, io_region->ret_code);
+ 			errstr = "cp fsm_io_helper";
+ 			cp_free(&private->cp);
+ 			goto err_out;
+ 		}
+ 		return;
+ 	} else if (scsw->cmd.fctl & SCSW_FCTL_HALT_FUNC) {
+-		VFIO_CCW_MSG_EVENT(2,
+-				   "%pUl (%x.%x.%04x): halt on io_region\n",
+-				   mdev_uuid(mdev), schid.cssid,
++		VFIO_CCW_MSG_EVENT(2, "%s (%x.%x.%04x): halt on io_region\n",
++				   dev_name(private->vdev.dev), schid.cssid,
+ 				   schid.ssid, schid.sch_no);
+ 		/* halt is handled via the async cmd region */
+ 		io_region->ret_code = -EOPNOTSUPP;
+ 		goto err_out;
+ 	} else if (scsw->cmd.fctl & SCSW_FCTL_CLEAR_FUNC) {
+-		VFIO_CCW_MSG_EVENT(2,
+-				   "%pUl (%x.%x.%04x): clear on io_region\n",
+-				   mdev_uuid(mdev), schid.cssid,
++		VFIO_CCW_MSG_EVENT(2, "%s (%x.%x.%04x): clear on io_region\n",
++				   dev_name(private->vdev.dev), schid.cssid,
+ 				   schid.ssid, schid.sch_no);
+ 		/* clear is handled via the async cmd region */
+ 		io_region->ret_code = -EOPNOTSUPP;
+diff --git a/drivers/s390/cio/vfio_ccw_ops.c b/drivers/s390/cio/vfio_ccw_ops.c
+index 97df5c711736..68aae25a0a4b 100644
+--- a/drivers/s390/cio/vfio_ccw_ops.c
++++ b/drivers/s390/cio/vfio_ccw_ops.c
+@@ -95,11 +95,9 @@ static int vfio_ccw_mdev_probe(struct mdev_device *mdev)
+ 	vfio_init_group_dev(&private->vdev, &mdev->dev,
+ 			    &vfio_ccw_dev_ops);
+ 
+-	private->mdev = mdev;
+-
+-	VFIO_CCW_MSG_EVENT(2, "mdev %pUl, sch %x.%x.%04x: create\n",
+-			   mdev_uuid(mdev), private->sch->schid.cssid,
+-			   private->sch->schid.ssid,
++	VFIO_CCW_MSG_EVENT(2, "mdev %s, sch %x.%x.%04x: create\n",
++			   dev_name(private->vdev.dev),
++			   private->sch->schid.cssid, private->sch->schid.ssid,
+ 			   private->sch->schid.sch_no);
+ 
+ 	ret = vfio_register_emulated_iommu_dev(&private->vdev);
+@@ -110,7 +108,6 @@ static int vfio_ccw_mdev_probe(struct mdev_device *mdev)
+ 
+ err_init:
+ 	vfio_uninit_group_dev(&private->vdev);
+-	private->mdev = NULL;
+ 	return ret;
+ }
+ 
+@@ -118,14 +115,13 @@ static void vfio_ccw_mdev_remove(struct mdev_device *mdev)
+ {
+ 	struct vfio_ccw_private *private = dev_get_drvdata(mdev->dev.parent);
+ 
+-	VFIO_CCW_MSG_EVENT(2, "mdev %pUl, sch %x.%x.%04x: remove\n",
+-			   mdev_uuid(mdev), private->sch->schid.cssid,
+-			   private->sch->schid.ssid,
++	VFIO_CCW_MSG_EVENT(2, "mdev %s, sch %x.%x.%04x: remove\n",
++			   dev_name(private->vdev.dev),
++			   private->sch->schid.cssid, private->sch->schid.ssid,
+ 			   private->sch->schid.sch_no);
+ 
+ 	vfio_unregister_group_dev(&private->vdev);
+ 	vfio_uninit_group_dev(&private->vdev);
+-	private->mdev = NULL;
+ }
+ 
+ static int vfio_ccw_mdev_open_device(struct vfio_device *vdev)
+diff --git a/drivers/s390/cio/vfio_ccw_private.h b/drivers/s390/cio/vfio_ccw_private.h
+index bbc97eb9d9c6..67ee9c624393 100644
+--- a/drivers/s390/cio/vfio_ccw_private.h
++++ b/drivers/s390/cio/vfio_ccw_private.h
+@@ -72,7 +72,6 @@ struct vfio_ccw_crw {
+  * @sch: pointer to the subchannel
+  * @state: internal state of the device
+  * @completion: synchronization helper of the I/O completion
+- * @mdev: pointer to the mediated device
+  * @nb: notifier for vfio events
+  * @io_region: MMIO region to input/output I/O arguments/results
+  * @io_mutex: protect against concurrent update of I/O regions
+@@ -95,7 +94,6 @@ struct vfio_ccw_private {
+ 	struct subchannel	*sch;
+ 	int			state;
+ 	struct completion	*completion;
+-	struct mdev_device	*mdev;
+ 	struct notifier_block	nb;
+ 	struct ccw_io_region	*io_region;
+ 	struct mutex		io_mutex;
+diff --git a/include/linux/mdev.h b/include/linux/mdev.h
+index 7cadbbac7de9..0ce1bb3dabd0 100644
+--- a/include/linux/mdev.h
++++ b/include/linux/mdev.h
+@@ -138,10 +138,6 @@ static inline void mdev_set_drvdata(struct mdev_device *mdev, void *data)
+ {
+ 	mdev->driver_data = data;
+ }
+-static inline const guid_t *mdev_uuid(struct mdev_device *mdev)
+-{
+-	return &mdev->uuid;
+-}
+ 
+ extern struct bus_type mdev_bus_type;
+ 
+-- 
+2.34.1
+

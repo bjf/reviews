@@ -1,0 +1,146 @@
+From 0bb7ff9f79322815e4751207d9cf8b5d1e3e37ae Mon Sep 17 00:00:00 2001
+From: Nicolin Chen <nicolinc@nvidia.com>
+Date: Wed, 6 Jul 2022 23:37:53 -0700
+Subject: [PATCH 133/141] iommu/arm-smmu-v3: Get prepared for nested
+ translation support
+
+When nested stage translation is setup, both s1_cfg and s2_cfg are
+required. And the IOMMUFD-based nested support uses two domains to
+represent two stages, having s1_cfg and s2_cfg respectively.
+
+For a nested domain, it will be in an S1 stage, while being able to
+access its S2 domain for s2_cfg, to configure the STE to the nested
+2-stage mode. And its s1_cfg and abort/bypass states will come from
+a guest. Thus, add "abort" and "bypass" in struct arm_smmu_domain.
+If no guest level configuration is set to s1 iommu_domain, they are
+ignored when writing the STE.
+
+Also, add "abort" and "translate" to help clarify the bypass/fault
+setup in arm_smmu_write_strtab_ent(), as it needs to take account
+of guest level setup too.
+
+In nested mode, only stage 2 will be "finalised" as the host does
+not own the stage 1 context descriptor; guest does. Thus, bypass S1
+domain's finalise routine, in case type is IOMMU_DOMAIN_NESTING.
+
+Change-Id: Ibe6ad7d82a3d1ce2a41ab8f3eebd89122002ad98
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+[nicolinc: dropped s1/s2_cfg coexist patch; dropped s1/s2_live part]
+Signed-off-by: Nicolin Chen <nicolinc@nvidia.com>
+
+33	3	drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+3	0	drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h
+
+diff --git a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+index 86a4d6f01b00..603b786dadda 100644
+--- a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
++++ b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c
+@@ -1259,6 +1259,7 @@ static void arm_smmu_write_strtab_ent(struct arm_smmu_master *master, u32 sid,
+ 	 */
+ 	u64 val = le64_to_cpu(dst[0]);
+ 	bool ste_live = false;
++	bool abort, translate = false;
+ 	struct arm_smmu_device *smmu = NULL;
+ 	struct arm_smmu_s1_cfg *s1_cfg = NULL;
+ 	struct arm_smmu_s2_cfg *s2_cfg = NULL;
+@@ -1278,7 +1279,8 @@ static void arm_smmu_write_strtab_ent(struct arm_smmu_master *master, u32 sid,
+ 	if (smmu_domain) {
+ 		switch (smmu_domain->stage) {
+ 		case ARM_SMMU_DOMAIN_S1:
+-			s1_cfg = &smmu_domain->s1_cfg;
++			if (!smmu_domain->bypass)
++				s1_cfg = &smmu_domain->s1_cfg;
+ 			break;
+ 		case ARM_SMMU_DOMAIN_S2:
+ 			s2_cfg = &smmu_domain->s2_cfg;
+@@ -1286,6 +1288,7 @@ static void arm_smmu_write_strtab_ent(struct arm_smmu_master *master, u32 sid,
+ 		default:
+ 			break;
+ 		}
++		translate = s1_cfg || s2_cfg;
+ 	}
+ 
+ 	if (val & STRTAB_STE_0_V) {
+@@ -1294,6 +1297,7 @@ static void arm_smmu_write_strtab_ent(struct arm_smmu_master *master, u32 sid,
+ 			break;
+ 		case STRTAB_STE_0_CFG_S1_TRANS:
+ 		case STRTAB_STE_0_CFG_S2_TRANS:
++		case STRTAB_STE_0_CFG_NESTED:
+ 			ste_live = true;
+ 			break;
+ 		case STRTAB_STE_0_CFG_ABORT:
+@@ -1308,8 +1312,13 @@ static void arm_smmu_write_strtab_ent(struct arm_smmu_master *master, u32 sid,
+ 	val = STRTAB_STE_0_V;
+ 
+ 	/* Bypass/fault */
+-	if (!smmu_domain || !(s1_cfg || s2_cfg)) {
+-		if (!smmu_domain && disable_bypass)
++	if (!smmu_domain)
++		abort = disable_bypass;
++	else
++		abort = smmu_domain->abort;
++
++	if (abort || !translate) {
++		if (abort)
+ 			val |= FIELD_PREP(STRTAB_STE_0_CFG, STRTAB_STE_0_CFG_ABORT);
+ 		else
+ 			val |= FIELD_PREP(STRTAB_STE_0_CFG, STRTAB_STE_0_CFG_BYPASS);
+@@ -1363,6 +1372,9 @@ static void arm_smmu_write_strtab_ent(struct arm_smmu_master *master, u32 sid,
+ 		dst[3] = cpu_to_le64(s2_cfg->vttbr & STRTAB_STE_3_S2TTB_MASK);
+ 
+ 		val |= FIELD_PREP(STRTAB_STE_0_CFG, STRTAB_STE_0_CFG_S2_TRANS);
++	} else {
++		dst[2] = 0;
++		dst[3] = 0;
+ 	}
+ 
+ 	if (master->ats_enabled)
+@@ -2199,6 +2211,24 @@ static int arm_smmu_domain_finalise(struct iommu_domain *domain,
+ 		return 0;
+ 	}
+ 
++	if (domain->type == IOMMU_DOMAIN_NESTING &&
++	    (!(smmu->features & ARM_SMMU_FEAT_TRANS_S1) ||
++	     !(smmu->features & ARM_SMMU_FEAT_TRANS_S2))) {
++		dev_info(smmu_domain->smmu->dev,
++			 "does not implement two stages\n");
++		return -EINVAL;
++	}
++
++	if (domain->type == IOMMU_DOMAIN_NESTING) {
++		/*
++		 * A nested domain is a virtual object for a 2-stage setup:
++		 * its s1 pgtbl is maintained by a guest OS, and its s2 pgtbl
++		 * is s2 iommu_domain. So no need to finalise anything here.
++		 */
++		smmu_domain->stage = ARM_SMMU_DOMAIN_S1;
++		return 0;
++	}
++
+ 	/* Restrict the stage to what we can actually support */
+ 	if (!(smmu->features & ARM_SMMU_FEAT_TRANS_S1))
+ 		smmu_domain->stage = ARM_SMMU_DOMAIN_S2;
+diff --git a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h
+index 95dc8ac8965e..3edddc361c56 100644
+--- a/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h
++++ b/drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.h
+@@ -206,6 +206,7 @@
+ #define STRTAB_STE_0_CFG_BYPASS		4
+ #define STRTAB_STE_0_CFG_S1_TRANS	5
+ #define STRTAB_STE_0_CFG_S2_TRANS	6
++#define STRTAB_STE_0_CFG_NESTED		7
+ 
+ #define STRTAB_STE_0_S1FMT		GENMASK_ULL(5, 4)
+ #define STRTAB_STE_0_S1FMT_LINEAR	0
+@@ -718,6 +719,8 @@ struct arm_smmu_domain {
+ 		struct arm_smmu_s1_cfg	s1_cfg;
+ 		struct arm_smmu_s2_cfg	s2_cfg;
+ 	};
++	bool				bypass;
++	bool				abort;
+ 
+ 	struct iommu_domain		domain;
+ 
+-- 
+2.34.1
+
